@@ -1,0 +1,18 @@
+{
+  "_comment": "Curated safe-cache allowlist (§5.3, §12.16, §13.5). Each target is an EXPLICIT, named directory known safe to clear, tagged with a rebuild-cost level. This is never a blanket ~/Library/Caches sweep. rebuild_cost: cheap | moderate | expensive. opt_in targets (expensive/disruptive) are never part of the default sweep. This is a starter set to be expanded in Phase 1.",
+  "version": 1,
+  "targets": [
+    { "id": "npm",        "path": "~/.npm/_cacache",            "category": "dev-cache", "rebuild_cost": "cheap",     "opt_in": false },
+    { "id": "yarn",       "path": "~/Library/Caches/Yarn",      "category": "dev-cache", "rebuild_cost": "cheap",     "opt_in": false },
+    { "id": "pnpm",       "path": "~/Library/pnpm/store",       "category": "dev-cache", "rebuild_cost": "moderate",  "opt_in": false },
+    { "id": "go-mod",     "path": "~/go/pkg/mod/cache",         "category": "dev-cache", "rebuild_cost": "moderate",  "opt_in": false },
+    { "id": "pip",        "path": "~/Library/Caches/pip",       "category": "dev-cache", "rebuild_cost": "cheap",     "opt_in": false },
+    { "id": "derived-data","path": "~/Library/Developer/Xcode/DerivedData", "category": "dev-cache", "rebuild_cost": "moderate", "opt_in": false },
+    { "id": "cocoapods",  "path": "~/Library/Caches/CocoaPods", "category": "dev-cache", "rebuild_cost": "moderate",  "opt_in": false },
+    { "id": "carthage",   "path": "~/Library/Caches/org.carthage.CarthageKit", "category": "dev-cache", "rebuild_cost": "moderate", "opt_in": false },
+    { "id": "swiftpm",    "path": "~/Library/Caches/org.swift.swiftpm", "category": "dev-cache", "rebuild_cost": "moderate", "opt_in": false },
+    { "id": "gradle",     "path": "~/.gradle/caches",           "category": "dev-cache", "rebuild_cost": "moderate",  "opt_in": false },
+    { "id": "homebrew",   "path": "~/Library/Caches/Homebrew",  "category": "dev-cache", "rebuild_cost": "cheap",     "opt_in": false },
+    { "id": "ios-device-support", "path": "~/Library/Developer/Xcode/iOS DeviceSupport", "category": "dev-cache", "rebuild_cost": "expensive", "opt_in": true, "warning": "Deleting this forces Xcode to re-extract symbol files (10-20 min) the next time a physical iOS device is connected." }
+  ]
+}

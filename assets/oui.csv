@@ -1,0 +1,4 @@
+# Embedded MAC-vendor OUI lookup table for the LAN scanner (§8, §12.6).
+# Format: oui_prefix,vendor   (e.g. "00:1A:2B,Example Vendor Inc")
+# Placeholder header; the real IEEE OUI dataset is dropped in during Phase 3.
+oui_prefix,vendor

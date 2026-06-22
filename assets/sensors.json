@@ -1,0 +1,5 @@
+{
+  "_comment": "Embedded board-ID -> sensor-key manifest (§5.2, §12.9). Sensor keys differ across M1/M2/M3/M4 generations, so this is updated with each release and shipped embedded (never fetched remotely). An unknown board ID degrades to 'N/A' rather than crashing; fanless Macs report no fans as 'N/A'. Placeholder to be populated in Phase 1.",
+  "version": 1,
+  "boards": {}
+}
