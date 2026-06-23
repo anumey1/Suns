@@ -2,63 +2,75 @@
 // potentially-destructive action is a typed Operation, not merely a file
 // deletion (§4.1, §4.2). The safety apparatus is polymorphic over OpKind.
 //
-// Concrete operation types are deliberately designed as value types so that
-// plan.Seal can deep-copy them into a pointer-free form (§4.5).
+// Concrete operation types are deliberately designed as VALUE types (no
+// pointers, slices, or maps in their fields) so that plan.Seal can deep-copy
+// them into a pointer-free form that retains no references into live state
+// (§4.5).
 package operation
 
-import "context"
+import (
+	"context"
+	"time"
 
-// OpKind identifies the kind of action. The string values are the neutral,
-// scriptable machine keys used in config and the operation history (§13.3).
-type OpKind string
-
-const (
-	KindFileDelete      OpKind = "file_delete"
-	KindProcessKill     OpKind = "process_kill"
-	KindCacheReset      OpKind = "cache_reset"
-	KindServiceUnload   OpKind = "service_unload"
-	KindRepoMaintenance OpKind = "repo_maintenance"
-	KindContainerPrune  OpKind = "container_prune"
-	KindReceiptForget   OpKind = "receipt_forget"
-	KindDNSFlush        OpKind = "dns_flush"
-)
-
-// Reversibility is the honest, per-operation classification surfaced in the
-// gate as 🟢 / 🟡 / 🔴 (§4.2).
-type Reversibility int
-
-const (
-	Reversible   Reversibility = iota // e.g. a trashed file → restore
-	Recoverable                       // e.g. git gc within reflog window; a cache that rebuilds
-	Irreversible                      // e.g. a killed process; an obliterated file; a DNS flush
-)
-
-// Mode is the deletion axis (Jarjar). It applies to FileDelete only (§4.3);
-// non-file operations ignore it entirely.
-type Mode int
-
-const (
-	ModeTrash      Mode = iota // move files to the macOS Trash (recoverable)
-	ModeObliterate             // permanently delete
+	"github.com/anumey1/Suns/pkg/safety/identity"
 )
 
 // Identity is execution-time proof that a target is still exactly what was
-// planned (§4.7). It is populated per-kind: device+inode for files, PID+birth
-// time+executable path for processes, domain+label+plist for services, and a
-// content hash for small high-risk files.
-type Identity struct{}
+// planned (§4.7). The Kind field selects which sub-identity is populated:
+// File for FileDelete, Process for ProcessKill, Service for ServiceUnload.
+type Identity struct {
+	Kind    OpKind
+	File    identity.FileIdent
+	Process identity.ProcessIdent
+	Service identity.ServiceIdent
+}
 
-// Preview is the per-kind render payload the gate displays (§4.2): a file
-// table for FileDelete, a process table for ProcessKill, a one-liner for
-// DNSFlush, and so on.
-type Preview struct{}
+// Preview is the per-target render payload the gate displays (§4.2). The gate
+// groups previews by Kind and renders the appropriate table plus a single
+// reversibility badge per group.
+type Preview struct {
+	Kind          OpKind
+	Reversibility Reversibility
+	Line          string // human-readable one-line description of this target
+	Bytes         int64  // reclaimable bytes (FileDelete); 0 otherwise
+}
 
 // Receipt is the outcome of Execute, fed to HistoryRecord.
-type Receipt struct{}
+type Receipt struct {
+	Kind      OpKind
+	Fate      string // "trashed" | "obliterated" | "skipped" | "killed" | "flushed"
+	Status    string // "ok" | "skipped:<reason>" | "failed"
+	TrashPath string // for trashed files
+	Err       error  // set when Status == "failed"
+	Time      time.Time
+}
 
-// HistoryEntry is a typed operation-history record appropriate to the kind
-// (§4.10).
-type HistoryEntry struct{}
+// HistoryEntry is a typed operation-history record (§4.10). Its fields cover all
+// op kinds; per-kind records populate only the relevant ones (omitempty keeps
+// the JSONL shape clean and matches the documented examples).
+type HistoryEntry struct {
+	TS         time.Time     `json:"ts"`
+	Plan       string        `json:"plan,omitempty"`
+	Op         OpKind        `json:"op"`
+	Reversible Reversibility `json:"reversible"`
+	Cmd        string        `json:"cmd,omitempty"`
+	Status     string        `json:"status,omitempty"`
+
+	// file_delete
+	Path      string              `json:"path,omitempty"`
+	Size      int64               `json:"size,omitempty"`
+	Fate      string              `json:"fate,omitempty"`
+	TrashPath string              `json:"trash_path,omitempty"`
+	OrigPath  string              `json:"orig_path,omitempty"`
+	Identity  *identity.FileIdent `json:"identity,omitempty"`
+
+	// process_kill
+	PID    int    `json:"pid,omitempty"`
+	Name   string `json:"name,omitempty"`
+	Birth  string `json:"birth,omitempty"`
+	Exec   string `json:"exec,omitempty"`
+	Signal string `json:"signal,omitempty"`
+}
 
 // Operation is any auditable, potentially-destructive action (§4.2).
 type Operation interface {

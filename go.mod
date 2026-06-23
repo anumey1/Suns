@@ -1,14 +1,15 @@
 module github.com/anumey1/Suns
 
-go 1.22
+go 1.25.0
 
 toolchain go1.26.4
 
-// Dependencies are intentionally not yet required: the scaffold is stdlib-only
-// so it compiles before the toolchain is set up. They will be added by
-// `go get` / `go mod tidy` as each package starts using them (§2):
+// Phase 0 (the safety spine) uses only the standard library plus
+// golang.org/x/sys/unix (for the fd-anchored deleter's openat/unlinkat). The
+// remaining dependencies (§2) are added by `go get` as the phases that need
+// them land:
 //
-//   github.com/spf13/cobra              command & flag routing
+//   github.com/spf13/cobra              command & flag routing (Phase 1)
 //   github.com/spf13/viper              config load (once, into SessionState)
 //   github.com/charmbracelet/bubbletea  TUI runtime (Elm architecture)
 //   github.com/charmbracelet/bubbles    prebuilt TUI components
@@ -17,5 +18,55 @@ toolchain go1.26.4
 //   github.com/NimbleMarkets/ntcharts   braille charts (Apple_Terminal fallback)
 //   github.com/lrstanley/bubblezone     mouse zones
 //   github.com/shirou/gopsutil/v4       in-process system stats
-//   golang.org/x/sys/unix               direct syscalls (openat/unlinkat/statfs/sysctl)
 //   howett.net/plist                    binary+XML plist parsing
+
+require (
+	github.com/charmbracelet/bubbles v1.0.0
+	github.com/charmbracelet/bubbletea v1.3.10
+	github.com/charmbracelet/lipgloss v1.1.0
+	github.com/shirou/gopsutil/v4 v4.26.5
+	github.com/spf13/cobra v1.10.2
+	github.com/spf13/viper v1.21.0
+	golang.org/x/sys v0.46.0
+	howett.net/plist v1.0.1
+)
+
+require (
+	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
+	github.com/charmbracelet/colorprofile v0.4.1 // indirect
+	github.com/charmbracelet/x/ansi v0.11.6 // indirect
+	github.com/charmbracelet/x/cellbuf v0.0.15 // indirect
+	github.com/charmbracelet/x/term v0.2.2 // indirect
+	github.com/clipperhouse/displaywidth v0.9.0 // indirect
+	github.com/clipperhouse/stringish v0.1.1 // indirect
+	github.com/clipperhouse/uax29/v2 v2.5.0 // indirect
+	github.com/ebitengine/purego v0.10.0 // indirect
+	github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f // indirect
+	github.com/fsnotify/fsnotify v1.9.0 // indirect
+	github.com/go-ole/go-ole v1.2.6 // indirect
+	github.com/go-viper/mapstructure/v2 v2.4.0 // indirect
+	github.com/inconshreveable/mousetrap v1.1.0 // indirect
+	github.com/lucasb-eyer/go-colorful v1.3.0 // indirect
+	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect
+	github.com/mattn/go-isatty v0.0.20 // indirect
+	github.com/mattn/go-localereader v0.0.1 // indirect
+	github.com/mattn/go-runewidth v0.0.19 // indirect
+	github.com/muesli/ansi v0.0.0-20230316100256-276c6243b2f6 // indirect
+	github.com/muesli/cancelreader v0.2.2 // indirect
+	github.com/muesli/termenv v0.16.0 // indirect
+	github.com/pelletier/go-toml/v2 v2.2.4 // indirect
+	github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55 // indirect
+	github.com/rivo/uniseg v0.4.7 // indirect
+	github.com/sagikazarmark/locafero v0.11.0 // indirect
+	github.com/sourcegraph/conc v0.3.1-0.20240121214520-5f936abd7ae8 // indirect
+	github.com/spf13/afero v1.15.0 // indirect
+	github.com/spf13/cast v1.10.0 // indirect
+	github.com/spf13/pflag v1.0.10 // indirect
+	github.com/subosito/gotenv v1.6.0 // indirect
+	github.com/tklauser/go-sysconf v0.3.16 // indirect
+	github.com/tklauser/numcpus v0.11.0 // indirect
+	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
+	github.com/yusufpapurcu/wmi v1.2.4 // indirect
+	go.yaml.in/yaml/v3 v3.0.4 // indirect
+	golang.org/x/text v0.28.0 // indirect
+)
