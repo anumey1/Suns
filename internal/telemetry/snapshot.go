@@ -100,6 +100,16 @@ type ProcInfo struct {
 	Mem  uint64
 }
 
+// NetProc is one row of the experimental per-process network attribution, fed by
+// the supervised nettop stream (§3.3, §7.5). It is EXPERIMENTAL: present only
+// while the stream is live and labelled as such in the UI.
+type NetProc struct {
+	Name          string
+	PID           int
+	RxBytesPerSec float64
+	TxBytesPerSec float64
+}
+
 // Host is uptime + load averages.
 type Host struct {
 	Uptime uint64
@@ -142,6 +152,7 @@ type SystemSnapshot struct {
 	Host     Host
 	Battery  Battery
 	Power    Power
+	NetProcs []NetProc // experimental per-process bandwidth (nettop), if streaming
 
 	// Sources carries health for each named source. The heavy/root sources
 	// (powermetrics GPU/thermal/power, IOKit, nettop) are present as

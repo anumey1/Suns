@@ -87,6 +87,7 @@ type model struct {
 	dashCancel          context.CancelFunc
 	powerStarted        bool
 	powerLauncher       telemetry.Launcher // injectable so tests never spawn sudo
+	netLauncher         telemetry.Launcher // injectable; experimental nettop stream
 	paused              bool
 	procCursor          int    // selected row in the top-processes table
 	dashStatus          string // transient status line (kill result / elevate)
@@ -104,6 +105,7 @@ func New(ctx context.Context, state *config.SessionState) model {
 		help:          help.New(),
 		spinner:       sp,
 		powerLauncher: powermetricsLauncher,
+		netLauncher:   nettopLauncher,
 		screen:        screenMenu,
 		menu: []menuItem{
 			{"Clean", "Trash dev caches from the safe-cache allowlist", actClean},
@@ -345,6 +347,14 @@ func (m model) enterDashboard(home bool) (tea.Model, tea.Cmd) {
 	ctx, cancel := context.WithCancel(m.ctx)
 	p := telemetry.New(time.Second)
 	go p.Run(ctx)
+	// Start the experimental per-process network stream (unprivileged nettop), so
+	// the NET widget warms without needing elevation (§3.3). Supervised: a stall
+	// relaunches; the source stays honestly Unavailable until it has two frames.
+	if m.netLauncher != nil {
+		ns := telemetry.NewNetSource(5)
+		p.AttachNetSource(ns)
+		go ns.Supervise(ctx, m.netLauncher, 5*time.Second)
+	}
 	m.poller = p
 	m.dashCtx = ctx
 	m.dashCancel = cancel

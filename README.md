@@ -88,7 +88,8 @@ done/remaining breakdown.
     unwrapped, shell/relative programs declined, Apple-managed skipped), and
     boots them out before trashing the plist.
   - `restore` hardened: confirmed FileDelete-only with a >50 MB large-object test.
-- **Phase 3 (in progress)** —
+- **Phase 3 (complete)** — read-only `net` + `audit` inspection suites, all with
+  `--json` and graceful-degradation parsing contracts:
   - `audit` (alias `secure`; `internal/audit`): a read-only security-posture view
     (SIP/Gatekeeper/FileVault via `csrutil`/`spctl`/`fdesetup` + XProtect version),
     with per-finding severity and `--json`. Parsing contracts degrade to "unknown".
@@ -105,6 +106,9 @@ done/remaining breakdown.
     degrading to "unavailable" cleanly; `--json`/`--interval`/`--top`.
   - Multi-volume disk: `get-coffee` now enumerates every mounted physical volume
     and surfaces the fullest one in the DISK tile (was root-only).
+  - Live NET widget (EXPERIMENTAL): a supervised, unprivileged `nettop` stream
+    (`internal/telemetry`) diffs consecutive frames for per-process tx/rx, shown
+    in the `get-coffee` dashboard with an honest health badge (warming/stalled).
 
 The remaining engine stubs (`optimizer`, `scheduler`) are design-intent doc
 comments pending Phases 3–4. Carry-forward on-device seams (native Cgo Trash,

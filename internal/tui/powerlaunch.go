@@ -30,7 +30,26 @@ func powermetricsLauncher(ctx context.Context) (io.ReadCloser, error) {
 	return &powerStream{r: stdout, cmd: cmd}, nil
 }
 
-// powerStream adapts a powermetrics subprocess to io.ReadCloser; Close kills it.
+// nettopLauncher starts an unprivileged long-lived `nettop -P -x -l 0` stream and
+// returns its stdout. Each ~1s frame reprints the CSV header; NetSource diffs
+// consecutive frames for per-process tx/rx. No elevation is needed, so this can
+// start as soon as the dashboard opens. Closing the stream kills the subprocess
+// so a stall can be recovered (§3.3, §7.4). This is an on-device live path, not
+// exercised by the headless tests (which drive the parser/stream with fixtures).
+func nettopLauncher(ctx context.Context) (io.ReadCloser, error) {
+	cmd := exec.CommandContext(ctx, "/usr/bin/nettop", "-P", "-x", "-l", "0", "-s", "1")
+	cmd.Env = []string{"LC_ALL=C", "PATH=/usr/bin:/bin:/usr/sbin:/sbin"}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	return &powerStream{r: stdout, cmd: cmd}, nil
+}
+
+// powerStream adapts a supervised subprocess to io.ReadCloser; Close kills it.
 type powerStream struct {
 	r   io.ReadCloser
 	cmd *exec.Cmd

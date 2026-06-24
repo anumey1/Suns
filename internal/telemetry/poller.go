@@ -39,6 +39,9 @@ type Poller struct {
 
 	powerMu  sync.RWMutex
 	powerSrc *PowerSource // optional; set once elevated (§7.2)
+
+	netMu  sync.RWMutex
+	netSrc *NetSource // optional; experimental per-process net (§3.3, §7.5)
 }
 
 // AttachPowerSource wires a supervised powermetrics source whose latest sample
@@ -53,6 +56,21 @@ func (p *Poller) power() *PowerSource {
 	p.powerMu.RLock()
 	defer p.powerMu.RUnlock()
 	return p.powerSrc
+}
+
+// AttachNetSource wires the supervised nettop stream whose latest top-N talkers
+// are merged into subsequent snapshots. nettop is unprivileged, so this can be
+// called as soon as the dashboard opens (§3.3).
+func (p *Poller) AttachNetSource(ns *NetSource) {
+	p.netMu.Lock()
+	defer p.netMu.Unlock()
+	p.netSrc = ns
+}
+
+func (p *Poller) net() *NetSource {
+	p.netMu.RLock()
+	defer p.netMu.RUnlock()
+	return p.netSrc
 }
 
 // New returns a Poller with the given cadence (default 1s).
@@ -204,8 +222,15 @@ func (p *Poller) sample(ctx context.Context) *SystemSnapshot {
 		}
 	}
 
-	// Per-process network attribution remains experimental / unwired (§7.5).
-	s.Sources[SrcNetwork] = SourceState{Health: HealthUnavailable, Reason: "experimental; not yet wired"}
+	// Per-process network attribution from the supervised nettop stream, if it
+	// has been attached. EXPERIMENTAL (§7.5); honestly Unavailable until it warms.
+	if ns := p.net(); ns != nil {
+		procs, st := ns.Latest()
+		s.NetProcs = procs
+		s.Sources[SrcNetwork] = st
+	} else {
+		s.Sources[SrcNetwork] = SourceState{Health: HealthUnavailable, Reason: "experimental; not started"}
+	}
 	return s
 }
 

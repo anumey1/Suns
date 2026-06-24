@@ -95,7 +95,7 @@ These are complete, building, and unit-tested under `-race` (do not redo):
   op kinds are excluded from `Candidates`) and added a real >50 MB sparse
   large-object (TierLarge size+mtime) round-trip test. **2.4 below is now DONE.**
 
-**Phase 3 — read-only inspection (in progress):**
+**Phase 3 — read-only inspection (complete):**
 - `internal/audit` + **`suns audit`** (alias `secure`): SIP/Gatekeeper/FileVault
   posture from `csrutil`/`spctl`/`fdesetup` + XProtect version, per-finding +
   overall severity, `--json`, parsing contracts that degrade to "unknown".
@@ -121,6 +121,11 @@ These are complete, building, and unit-tested under `-race` (do not redo):
   the poller now enumerates every mounted physical (`/dev`-backed) volume; the
   get-coffee DISK tile shows the fullest volume by used-%. **§3.3 multi-volume is
   now DONE.**
+- **Per-PID net in the live dashboard** (`internal/telemetry/netsource.go` +
+  dashboard `dashNet`): a supervised, unprivileged `nettop -P -x -l 0` stream
+  diffs consecutive frames into top-N per-process tx/rx, merged into the snapshot
+  and rendered in the NET widget with an EXPERIMENTAL label and honest health.
+  **§3.3 per-PID net is now DONE.** Phase 3 is feature-complete.
 
 ---
 
@@ -309,9 +314,16 @@ root). Mature the parsing-contract layer (§13.1). All support `--json`.
   `disk.Partitions`, dedupes mountpoints, sorts root-first, and falls back to `/`.
   The get-coffee DISK tile (`internal/tui/dashboard.go`) now shows the **fullest**
   volume (highest used-%), labelled with its short mountpoint.
-- Wiring `nettop` per-PID into the *live dashboard* NET widget (a long-lived
-  supervised stream, like powermetrics) remains an explicitly EXPERIMENTAL
-  carry-forward — `suns net bw` already delivers the per-process picture on demand.
+- **Per-PID net in the live dashboard** ✅ DONE (EXPERIMENTAL) —
+  `internal/telemetry/netsource.go` `NetSource` consumes a long-lived,
+  unprivileged `nettop -P -x -l 0` stream under the same supervisor/watchdog as
+  powermetrics (launch → diff consecutive frames → on stall/EOF relaunch with
+  backoff). The poller merges its latest top-N into the snapshot; the get-coffee
+  NET widget (`internal/tui/dashboard.go` `dashNet`) lists the top talkers with an
+  explicit "experimental" label, and shows the honest health reason (warming /
+  stalled) rather than fake zeros until two frames are differenced. nettop needs
+  no elevation, so it starts as soon as the dashboard opens. Streaming parser +
+  frame-diff + stall behaviour unit-tested under `-race` with fixtures.
 
 **Phase 3 definition of done:** `net` + `audit` read-only suites with `--json`,
 parsing contracts with version detection + graceful degradation (§13.1),
@@ -478,9 +490,10 @@ exist. Remaining: `RepoMaintenanceOp`, `ContainerPruneOp`, `CacheResetOp`.
    process kill.
 3. **Phase 2 — DONE.** Uninstaller (`nuke`) + APFS-conservative `ashen` (dedup) +
    orphaned launch-agent purge (`orphans`) + restore hardening.
-4. **Phase 3 — NEXT.** `net` + `audit` read-only suites; parsing-contract layer
-   matures; `nettop` per-PID stays experimental.
-5. **Phase 4.** `maintain`, Docker prune, DNS flush, empty-dir + broken-symlink
+4. **Phase 3 — DONE.** `net` (sockets/ports/LAN/bandwidth) + `audit`
+   (posture/auth-log) read-only suites; parsing-contract layer matured; per-PID
+   `nettop` wired into the live dashboard as a supervised experimental stream.
+5. **Phase 4 — NEXT.** `maintain`, Docker prune, DNS flush, empty-dir + broken-symlink
    destroyers, `schedule` (launchd), quarantined `lang-strip` (last), and the
    universal-binary + codesign + notarize + Homebrew **release pipeline**.
 

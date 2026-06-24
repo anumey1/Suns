@@ -28,10 +28,11 @@ func (m model) renderDashboard(h int) string {
 
 	header := m.dashHeader(snap)
 	tiles := m.dashTiles(th, snap)
+	net := m.dashNet(th, snap)
 	procs := m.dashProcs(th, snap)
 	hints := th.MutedText().Render("↑/↓ select · k kill (gated) · e elevate · p pause · esc back")
 
-	return strings.Join([]string{header, "", tiles, "", procs, "", hints}, "\n")
+	return strings.Join([]string{header, "", tiles, "", net, "", procs, "", hints}, "\n")
 }
 
 func (m model) dashHeader(snap *telemetry.SystemSnapshot) string {
@@ -112,6 +113,33 @@ func (m model) dashTiles(th theme.Theme, snap *telemetry.SystemSnapshot) string 
 	row1 := lipgloss.JoinHorizontal(lipgloss.Top, cpu, mem, gpu, thermal)
 	row2 := lipgloss.JoinHorizontal(lipgloss.Top, io, space, battery, power)
 	return lipgloss.JoinVertical(lipgloss.Left, row1, row2)
+}
+
+// dashNet renders the EXPERIMENTAL per-process network widget fed by the
+// supervised nettop stream (§3.3, §7.5). Until it has two frames it shows the
+// honest health reason rather than fake zeros; once live it lists the top
+// talkers with an explicit "experimental" label.
+func (m model) dashNet(th theme.Theme, snap *telemetry.SystemSnapshot) string {
+	badge := health(snap, telemetry.SrcNetwork)
+	head := th.Title().Render("NET") + " " + badge + " " + th.MutedText().Render("per-process · experimental")
+	if len(snap.NetProcs) == 0 {
+		reason := snap.Sources[telemetry.SrcNetwork].Reason
+		if reason == "" {
+			reason = "warming up…"
+		}
+		return head + "\n" + th.MutedText().Render("  "+reason)
+	}
+	var b strings.Builder
+	b.WriteString(head + "\n")
+	for _, p := range snap.NetProcs {
+		name := p.Name
+		if len(name) > 22 {
+			name = name[:21] + "…"
+		}
+		b.WriteString(th.NormalText().Render(fmt.Sprintf("  %-6d %-22s ↓ %9s/s  ↑ %9s/s",
+			p.PID, name, humanBytes(int64(p.RxBytesPerSec)), humanBytes(int64(p.TxBytesPerSec)))) + "\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 func (m model) dashProcs(th theme.Theme, snap *telemetry.SystemSnapshot) string {
