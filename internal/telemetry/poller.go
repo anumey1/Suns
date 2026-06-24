@@ -3,6 +3,7 @@ package telemetry
 import (
 	"context"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -140,9 +141,9 @@ func (p *Poller) sample(ctx context.Context) *SystemSnapshot {
 		s.Sources[SrcMemory] = SourceState{Health: HealthUnavailable, Reason: "memory read failed"}
 	}
 
-	// Disk usage (root volume) + I/O rates.
-	if u, err := disk.UsageWithContext(ctx, "/"); err == nil {
-		s.Disks = append(s.Disks, DiskUsage{Path: "/", Total: u.Total, Used: u.Used, Free: u.Free, UsedPercent: u.UsedPercent})
+	// Disk usage (every mounted physical volume) + I/O rates.
+	s.Disks = readVolumes(ctx)
+	if len(s.Disks) > 0 {
 		s.Sources[SrcDisk] = SourceState{Health: HealthLive, LastSample: now}
 	} else {
 		s.Sources[SrcDisk] = SourceState{Health: HealthUnavailable, Reason: "disk usage read failed"}
@@ -228,6 +229,41 @@ func topProcesses(ctx context.Context, n int) []ProcInfo {
 		infos = infos[:n]
 	}
 	return infos
+}
+
+// readVolumes reports usage for every mounted physical volume (§3.3), with the
+// root volume first. It falls back to root-only if partition enumeration fails.
+// Synthetic/virtual mounts (no /dev device) are skipped, and each mountpoint is
+// reported once.
+func readVolumes(ctx context.Context) []DiskUsage {
+	var vols []DiskUsage
+	seen := map[string]bool{}
+	if parts, err := disk.PartitionsWithContext(ctx, false); err == nil {
+		for _, pt := range parts {
+			if seen[pt.Mountpoint] || !strings.HasPrefix(pt.Device, "/dev/") {
+				continue
+			}
+			u, err := disk.UsageWithContext(ctx, pt.Mountpoint)
+			if err != nil || u.Total == 0 {
+				continue
+			}
+			seen[pt.Mountpoint] = true
+			vols = append(vols, DiskUsage{Path: pt.Mountpoint, Total: u.Total, Used: u.Used, Free: u.Free, UsedPercent: u.UsedPercent})
+		}
+	}
+	if len(vols) == 0 {
+		if u, err := disk.UsageWithContext(ctx, "/"); err == nil {
+			vols = append(vols, DiskUsage{Path: "/", Total: u.Total, Used: u.Used, Free: u.Free, UsedPercent: u.UsedPercent})
+		}
+	}
+	// Root volume first; the rest by mountpoint.
+	sort.SliceStable(vols, func(i, j int) bool {
+		if (vols[i].Path == "/") != (vols[j].Path == "/") {
+			return vols[i].Path == "/"
+		}
+		return vols[i].Path < vols[j].Path
+	})
+	return vols
 }
 
 // saturatingSub avoids underflow when counters reset.

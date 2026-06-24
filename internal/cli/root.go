@@ -60,6 +60,8 @@ in a later Phase 1 slice; this build ships the headless safety core.`,
 	root.AddCommand(newAshenCmd())
 	root.AddCommand(newNukeCmd())
 	root.AddCommand(newOrphansCmd())
+	root.AddCommand(newAuditCmd())
+	root.AddCommand(newNetCmd())
 	root.AddCommand(newRestoreCmd())
 	root.AddCommand(newGetCoffeeCmd())
 	root.AddCommand(newPsCmd())

@@ -95,6 +95,33 @@ These are complete, building, and unit-tested under `-race` (do not redo):
   op kinds are excluded from `Candidates`) and added a real >50 MB sparse
   large-object (TierLarge size+mtime) round-trip test. **2.4 below is now DONE.**
 
+**Phase 3 — read-only inspection (in progress):**
+- `internal/audit` + **`suns audit`** (alias `secure`): SIP/Gatekeeper/FileVault
+  posture from `csrutil`/`spctl`/`fdesetup` + XProtect version, per-finding +
+  overall severity, `--json`, parsing contracts that degrade to "unknown".
+  Unit-tested under `-race`. **§3.2a is now DONE.**
+- `internal/net` + **`suns net`**: per-app socket mapper + open-port auditor.
+  Parses `lsof -F` field output, classifies listening ports by reachability
+  (wildcard/loopback/specific), bounded cached reverse-DNS, `--json`/`--no-dns`.
+  Unit-tested under `-race`. **§3.1a and §3.1b are now DONE.**
+- **`suns audit logs`** (`internal/audit.AuthLog`): sudo/auth timeline from the
+  unified log (root via chokepoint), success/failure/denied classification,
+  per-user rapid-failure burst detection, `--json`/`--since`. Unit-tested under
+  `-race`. **§3.2b is now DONE.**
+- **`suns net lan`** (`internal/net.LANScan`): passive ARP-cache LAN discovery
+  with curated-subset OUI vendor + reverse-DNS hostname, and a warn-gated active
+  port probe (`--probe`). `arp` allowlisted. Unit-tested under `-race`. **§3.1c is
+  now DONE.**
+- **`suns net bw`** (`internal/net.Bandwidth`): per-interface throughput from the
+  kernel interface counters (reliable core) plus EXPERIMENTAL per-process tx/rx by
+  differencing a two-sample `nettop -P -x` capture; degrades to "unavailable"
+  cleanly when nettop can't be read, `--json`/`--interval`/`--top`. Unit-tested
+  under `-race`. **§3.1d is now DONE.**
+- **Multi-volume disk** (`internal/telemetry/poller.go` `readVolumes` + dashboard):
+  the poller now enumerates every mounted physical (`/dev`-backed) volume; the
+  get-coffee DISK tile shows the fullest volume by used-%. **§3.3 multi-volume is
+  now DONE.**
+
 ---
 
 ## 1. Carry-forward — staged seams to finish ON-DEVICE
@@ -110,7 +137,6 @@ headless test. They are **not** new phases; finish them opportunistically.
 | IOKit thermals (Cgo) | `internal/telemetry/iokit.go` | Implement bounded IOKit `IOHIDEventSystemClient` reads (+ Intel SMC) using `assets/sensors.json`; per-call timeout in a bounded goroutine; supervise. Populate `sensors.json` board-ID → key map. | §4.4, §5.2, §12.9 |
 | Live powermetrics | `internal/tui/powerlaunch.go` | Validate the `sudo -n powermetrics` stream end-to-end; confirm the field mapping in `DecodePowerMetrics` against captured output; refine samplers. | §7.2, §7.3 |
 | Battery extras | `internal/telemetry/battery.go` | Add wattage / cycle count / health via `ioreg AppleSmartBattery` (pmset gives %/state/time only). | §11 widget 6 |
-| Multi-volume disk | `internal/telemetry/poller.go` | Enumerate `disk.Partitions` and report each mounted volume (currently only `/`). | §11 widget 8 |
 | ULID for plan IDs | `pkg/plan/plan.go` | Optionally swap the home-grown time-sortable ID for a canonical ULID lib. | §4.5 |
 
 ---
@@ -231,38 +257,61 @@ engine §15 tests green under `-race`. **PHASE 2 COMPLETE.**
 Goal: read-only inspection. **No gate, no prompts** (except the auth-log query’s
 root). Mature the parsing-contract layer (§13.1). All support `--json`.
 
-### 3.1 `suns net` — Network suite (`internal/net`, stub exists)
-- **3.1a Per-App Socket Mapper (§12.5)** — parse `lsof -i -n -P` → PID → app →
-  local/remote addr+port table, with **async cached reverse-DNS**; highlight
-  unexpected outbound connections.
-- **3.1b Open Port Auditor (§12.12)** — map `LISTEN` sockets to PID/app; flag
-  `0.0.0.0`/`::`-bound (externally reachable) vs loopback-only, with a
-  security-severity color. Great for catching an exposed dev DB.
-- **3.1c LAN Scan (§12.6)** — IP + MAC (ARP table) + vendor (**embedded OUI
-  table** `assets/oui.csv`) + hostname (reverse DNS + mDNS/Bonjour); optional
-  active port probe. **Warn before active scanning** on networks the operator may
-  not own. Do **not** promise “every detail about every device.”
-- **3.1d Bandwidth Hog Detector (§12.7) — EXPERIMENTAL.** Per-process tx/rx
-  deltas from a **long-lived `nettop -P -l 0` stream** (gopsutil per-PID net is
-  unreliable on Darwin); interface totals from `sysctl` are the reliable core.
-  Degrade cleanly to “unavailable” rather than show wrong numbers (§7.5).
-- **Work:** `nettop`/`lsof` parsing contracts; OUI dataset populated into
-  `assets/oui.csv`; `sysctl` interface counters via `x/sys/unix`.
+### 3.1 `suns net` — Network suite (`internal/net`)
+- **3.1a Per-App Socket Mapper (§12.5)** ✅ DONE — `net.Sockets` parses
+  `lsof -i -n -P -F pcnPtT` (field mode, robust contract in `lsof.go`) → PID →
+  app → local/remote addr+port table, with **async cached, bounded reverse-DNS**.
+  CLI `suns net`, read-only, `--json`, `--no-dns`.
+- **3.1b Open Port Auditor (§12.12)** ✅ DONE — listening sockets classified by
+  scope (wildcard `0.0.0.0`/`::` → exposed; loopback; specific), severity-marked
+  in the listing. Parsers + scope classification unit-tested under `-race` with an
+  lsof fixture (wildcard/loopback/IPv6/established/UDP).
+- **3.1c LAN Scan (§12.6)** ✅ DONE — `net.LANScan` parses `arp -a -n` (IP + MAC +
+  interface, skipping incomplete/broadcast/multicast), adds a **curated-subset
+  OUI** vendor (`assets/oui.csv`, unknown → "unknown vendor") and a bounded
+  cached reverse-DNS hostname. Optional active TCP port probe is **gated behind a
+  warn-and-confirm** (`--probe`, ack with `--yes`). CLI `suns net lan`, passive by
+  default, `--json`/`--no-dns`. `arp` added to the syscmd allowlist + doctor.
+  Parser/OUI/MAC-normalization unit-tested under `-race`. (Explicit mDNS via
+  `dns-sd` is a future refinement; reverse DNS already resolves `.local` on macOS.)
+- **3.1d Bandwidth Hog Detector (§12.7) — EXPERIMENTAL.** ✅ DONE —
+  `internal/net.Bandwidth`. Interface totals are the **reliable core**: gopsutil
+  per-interface byte counters differenced over one short window. Per-process tx/rx
+  is **EXPERIMENTAL**: a two-sample `nettop -P -x -L 2` capture differenced by
+  PID using the rows' own timestamps; `parseNettop` finds the `bytes_in`/
+  `bytes_out` columns from the header and drops any process seen only once. It
+  degrades to `ProcessesAvailable:false` rather than show wrong numbers (§7.5).
+  The interface sample and nettop run **concurrently** so the whole call takes ~one
+  window. CLI `suns net bw` (alias `bandwidth`), `--json`/`--interval`/`--top`.
+  `parseNettop`/`splitNamePID` unit-tested under `-race` with a two-sample fixture.
 
-### 3.2 `suns audit` / `suns secure` — Security posture (`internal/audit`, stub exists)
-- **3.2a SIP / Gatekeeper / FileVault (§12.13)** — parse `csrutil status`,
-  `spctl --status`, `fdesetup status` into one posture view; add Gatekeeper
-  assessment and, where readable, secure-boot + XProtect version. Stable native
-  output → accurate.
-- **3.2b Sudo / Auth-Log Analyzer (§12.14) — root.** Query the **unified log**
-  (`log show --predicate 'process == "sudo"' --last 1d`, plus
-  `Authorization`/`opendirectoryd` predicates) — **not** the deprecated
-  `/var/log/system.log`. Render a timeline with rapid-failure highlighting. Needs
-  the **chokepoint** (`log` is already in the privileged allowlist).
+### 3.2 `suns audit` / `suns secure` — Security posture (`internal/audit`)
+- **3.2a SIP / Gatekeeper / FileVault (§12.13)** ✅ DONE — `internal/audit.Posture`
+  parses `csrutil status`, `spctl --status`, `fdesetup status` into one posture
+  view with per-finding + overall severity, plus the XProtect version (read
+  binary-safe via `pkg/plist`). CLI `suns audit` (alias `secure`), read-only,
+  `--json`. Parsing contracts in `internal/audit/parse.go` degrade to "unknown"
+  on unexpected output; parsers + engine unit-tested under `-race`. (secure-boot
+  via `bputil` needs root — deferred to the §3.2b root slice.)
+- **3.2b Sudo / Auth-Log Analyzer (§12.14) — root.** ✅ DONE — `audit.AuthLog`
+  queries the **unified log** (`log show --style json --predicate 'process ==
+  "sudo"' --last 1d --info`) — **not** the deprecated `/var/log/system.log` —
+  classifies each entry (success / failure / denied), extracts the actor, and
+  detects per-user **rapid-failure bursts** (≥3 within 60s). CLI `suns audit
+  logs`, `--json`, `--since`; root acquired once via the **chokepoint** (`log` is
+  allowlisted). Parser + burst detection unit-tested under `-race` with a log JSON
+  fixture. (Broadening the predicate to `Authorization`/`opendirectoryd` and
+  secure-boot via `bputil` are future refinements.)
 
 ### 3.3 Telemetry: finish per-PID net + multi-volume
-- Wire `nettop` per-PID into the dashboard NET widget (experimental badge); add
-  the multi-volume disk carry-forward (§1).
+- **Multi-volume disk** ✅ DONE — `internal/telemetry/poller.go` `readVolumes`
+  enumerates every mounted physical (`/dev`-backed) volume via
+  `disk.Partitions`, dedupes mountpoints, sorts root-first, and falls back to `/`.
+  The get-coffee DISK tile (`internal/tui/dashboard.go`) now shows the **fullest**
+  volume (highest used-%), labelled with its short mountpoint.
+- Wiring `nettop` per-PID into the *live dashboard* NET widget (a long-lived
+  supervised stream, like powermetrics) remains an explicitly EXPERIMENTAL
+  carry-forward — `suns net bw` already delivers the per-process picture on demand.
 
 **Phase 3 definition of done:** `net` + `audit` read-only suites with `--json`,
 parsing contracts with version detection + graceful degradation (§13.1),

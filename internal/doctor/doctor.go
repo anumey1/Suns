@@ -46,6 +46,7 @@ func (r Report) OK() bool {
 // each is present at its pinned path (§6.3).
 var pinnedTools = []string{
 	"/usr/sbin/lsof",
+	"/usr/sbin/arp",
 	"/usr/bin/nettop",
 	"/usr/bin/powermetrics",
 	"/usr/sbin/pkgutil",

@@ -31,6 +31,7 @@ const DefaultMaxOutput = 8 << 20 // 8 MiB
 // engines land in later phases.
 var productionAllowlist = map[string]string{
 	"lsof":         "/usr/sbin/lsof",
+	"arp":          "/usr/sbin/arp",
 	"nettop":       "/usr/bin/nettop",
 	"powermetrics": "/usr/bin/powermetrics",
 	"pkgutil":      "/usr/sbin/pkgutil",

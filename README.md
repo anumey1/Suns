@@ -88,8 +88,24 @@ done/remaining breakdown.
     unwrapped, shell/relative programs declined, Apple-managed skipped), and
     boots them out before trashing the plist.
   - `restore` hardened: confirmed FileDelete-only with a >50 MB large-object test.
+- **Phase 3 (in progress)** —
+  - `audit` (alias `secure`; `internal/audit`): a read-only security-posture view
+    (SIP/Gatekeeper/FileVault via `csrutil`/`spctl`/`fdesetup` + XProtect version),
+    with per-finding severity and `--json`. Parsing contracts degrade to "unknown".
+  - `net` (`internal/net`): per-app socket mapper + open-port auditor. Parses
+    `lsof -F` field output, flags externally-reachable (wildcard) listening ports
+    vs loopback, bounded cached reverse-DNS, `--json`/`--no-dns`.
+  - `audit logs` (`internal/audit`): sudo/auth timeline from the unified log
+    (root, via the chokepoint) with success/failure/denied classification and
+    per-user rapid-failure burst detection; `--json`/`--since`.
+  - `net lan` (`internal/net`): passive ARP-cache LAN discovery (IP/MAC/vendor via
+    a curated OUI subset/hostname) with a warn-gated active port probe (`--probe`).
+  - `net bw` (`internal/net`): per-interface throughput (the reliable core) plus
+    EXPERIMENTAL per-process tx/rx by differencing a two-sample `nettop` capture,
+    degrading to "unavailable" cleanly; `--json`/`--interval`/`--top`.
+  - Multi-volume disk: `get-coffee` now enumerates every mounted physical volume
+    and surfaces the fullest one in the DISK tile (was root-only).
 
-The remaining engine stubs (`net`, `audit`, `optimizer`, `scheduler`) are
-design-intent doc comments pending Phases 3–4. Carry-forward on-device seams
-(native Cgo Trash, IOKit thermals, live powermetrics) are flagged in
-`Docs/Phases.md` §1.
+The remaining engine stubs (`optimizer`, `scheduler`) are design-intent doc
+comments pending Phases 3–4. Carry-forward on-device seams (native Cgo Trash,
+IOKit thermals, live powermetrics) are flagged in `Docs/Phases.md` §1.

@@ -1,4 +1,77 @@
 # Embedded MAC-vendor OUI lookup table for the LAN scanner (§8, §12.6).
-# Format: oui_prefix,vendor   (e.g. "00:1A:2B,Example Vendor Inc")
-# Placeholder header; the real IEEE OUI dataset is dropped in during Phase 3.
-oui_prefix,vendor
+# Format: oui_prefix,vendor   (prefix = first three MAC octets, "AA:BB:CC")
+#
+# This is a deliberately CURATED COMMON SUBSET, not the full IEEE registry: it
+# covers frequently-seen consumer/network/IoT vendors to keep the binary lean.
+# A MAC whose prefix is absent here is reported as "unknown vendor" — honest, not
+# wrong. Expand as needed; the lookup is prefix-exact and case-insensitive.
+#
+# Apple (a small sample of Apple's many registered prefixes)
+00:1B:63,Apple
+00:1E:C2,Apple
+00:25:00,Apple
+3C:07:54,Apple
+A4:5E:60,Apple
+AC:DE:48,Apple
+88:66:5A,Apple
+DC:A9:04,Apple
+F4:F1:5A,Apple
+90:B2:1F,Apple
+F0:18:98,Apple
+6C:40:08,Apple
+A8:5C:2C,Apple
+# Raspberry Pi
+B8:27:EB,Raspberry Pi Foundation
+DC:A6:32,Raspberry Pi Trading
+E4:5F:01,Raspberry Pi Trading
+# Espressif (ESP8266/ESP32 — common in DIY IoT)
+24:0A:C4,Espressif
+30:AE:A4,Espressif
+5C:CF:7F,Espressif
+84:F3:EB,Espressif
+A0:20:A6,Espressif
+# Intel
+00:1B:21,Intel
+3C:97:0E,Intel
+8C:16:45,Intel
+9C:B6:D0,Intel
+34:13:E8,Intel
+# Ubiquiti
+00:15:6D,Ubiquiti
+24:A4:3C,Ubiquiti
+78:8A:20,Ubiquiti
+FC:EC:DA,Ubiquiti
+# TP-Link
+50:C7:BF,TP-Link
+14:CC:20,TP-Link
+A4:2B:B0,TP-Link
+# Netgear
+00:09:5B,Netgear
+20:E5:2A,Netgear
+9C:3D:CF,Netgear
+# Samsung
+00:12:FB,Samsung
+78:1F:DB,Samsung
+8C:77:12,Samsung
+5C:0A:5B,Samsung
+# Google / Nest
+F4:F5:D8,Google
+1C:F2:9A,Google
+38:8B:59,Google
+# Amazon
+44:65:0D,Amazon Technologies
+68:37:E9,Amazon Technologies
+F0:27:2D,Amazon Technologies
+FC:65:DE,Amazon Technologies
+# Sonos
+00:0E:58,Sonos
+5C:AA:FD,Sonos
+94:9F:3E,Sonos
+B8:E9:37,Sonos
+# VMware (virtual NICs)
+00:05:69,VMware
+00:0C:29,VMware
+00:50:56,VMware
+# Cisco
+00:1A:2F,Cisco
+00:25:9C,Cisco Linksys

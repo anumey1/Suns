@@ -67,13 +67,17 @@ func (m model) dashTiles(th theme.Theme, snap *telemetry.SystemSnapshot) string 
 		fmt.Sprintf("R %s/s", humanBytes(int64(snap.DiskIO.ReadBytesPerSec))),
 		fmt.Sprintf("W %s/s", humanBytes(int64(snap.DiskIO.WriteBytesPerSec))))
 
-	var diskBody, diskSpark string
+	// Show the fullest volume across all mounted physical volumes (§3.3), so the
+	// most space-constrained disk is what surfaces, not just root.
+	var diskBody, diskSpark, diskTitle string
+	diskTitle = "DISK"
 	if len(snap.Disks) > 0 {
-		d := snap.Disks[0]
+		d := fullestVolume(snap.Disks)
 		diskBody = fmt.Sprintf("%4.1f%% used", d.UsedPercent)
 		diskSpark = components.Gauge(d.UsedPercent, tileWidth-4)
+		diskTitle = "DISK " + shortVolume(d.Path)
 	}
-	space := tile(th, "DISK /", health(snap, telemetry.SrcDisk), diskBody, diskSpark)
+	space := tile(th, diskTitle, health(snap, telemetry.SrcDisk), diskBody, diskSpark)
 
 	// GPU / thermal / power come from the supervised powermetrics stream once
 	// elevated; until then they honestly read N/A (no fake zeros).
@@ -156,6 +160,30 @@ func health(snap *telemetry.SystemSnapshot, src string) string {
 	default:
 		return "⚠ N/A"
 	}
+}
+
+// fullestVolume picks the volume with the highest used-percentage, preferring
+// root on a tie so the tile stays stable when volumes are equally empty.
+func fullestVolume(disks []telemetry.DiskUsage) telemetry.DiskUsage {
+	best := disks[0]
+	for _, d := range disks[1:] {
+		if d.UsedPercent > best.UsedPercent {
+			best = d
+		}
+	}
+	return best
+}
+
+// shortVolume labels a mountpoint compactly for the tile title: "/" stays "/",
+// "/Volumes/Data" becomes "Data".
+func shortVolume(path string) string {
+	if path == "/" {
+		return "/"
+	}
+	if i := strings.LastIndex(path, "/"); i >= 0 && i+1 < len(path) {
+		return path[i+1:]
+	}
+	return path
 }
 
 func humanUptime(sec uint64) string {
