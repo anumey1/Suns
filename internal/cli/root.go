@@ -51,9 +51,15 @@ in a later Phase 1 slice; this build ships the headless safety core.`,
 	// Wire the privilege-capable process killer for ProcessKill operations
 	// (own-user direct; root/other-user delegated under sudo, §4.7).
 	operation.UseProcessKiller(procadmin.New())
+	// Wire the privilege-capable system runner for ServiceUnload / ReceiptForget
+	// (unprivileged reads direct; privileged mutations via the chokepoint, §6).
+	operation.UseSystemRunner(newElevatingRunner())
 
 	root.AddCommand(newDoctorCmd())
 	root.AddCommand(newCleanCmd())
+	root.AddCommand(newAshenCmd())
+	root.AddCommand(newNukeCmd())
+	root.AddCommand(newOrphansCmd())
 	root.AddCommand(newRestoreCmd())
 	root.AddCommand(newGetCoffeeCmd())
 	root.AddCommand(newPsCmd())

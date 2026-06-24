@@ -16,5 +16,5 @@
 // is a first-class state, distinct from "EOF/dead".
 package plist
 
-// TODO(phase0/phase1): howett-backed Parse with plutil fallback; the
-// deadline-guarded powermetrics stream tokenizer.
+// The binary-safe property-list reader lives in reader.go. The deadline-guarded
+// powermetrics stream tokenizer is implemented in tokenizer.go.

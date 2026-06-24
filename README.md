@@ -72,8 +72,24 @@ done/remaining breakdown.
   `restore`, the read-only `get-coffee` telemetry dashboard, gated process kill
   (`ps` + hidden privileged killer), and `doctor`. CLI commands: `doctor`,
   `clean`, `restore`, `get-coffee`, `ps`.
+- **Phase 2 (complete)** —
+  - `ashen` (the APFS-conservative duplicate finder; `internal/dedup`):
+    three-pass hash detection → frozen plan → gate → trash, with
+    hardlink/bundle/symlink/floor guards and the shared-block correction. The
+    `dedup` spec name is kept as a hidden alias.
+  - `nuke <app>` (the precision uninstaller; `internal/uninstaller`): bundle-ID
+    tracing, `~/Library` + launch-agent tracing, `pkgutil` payload harvest with
+    the `--file-info` shared-dependency guard, an ordered plan (ServiceUnload →
+    FileDelete → ReceiptForget), and explicit UI scope bounds. New op kinds
+    `ServiceUnloadOp` / `ReceiptForgetOp` execute via the privilege chokepoint;
+    `pkg/plist` provides binary-safe Info.plist reading.
+  - `orphans` (the orphaned launch-agent purge; `internal/orphans`): flags
+    launchd jobs whose resolved executable is gone, conservatively (env-launchers
+    unwrapped, shell/relative programs declined, Apple-managed skipped), and
+    boots them out before trashing the plist.
+  - `restore` hardened: confirmed FileDelete-only with a >50 MB large-object test.
 
-The engine stubs (`uninstaller`, `dedup`, `net`, `audit`, `optimizer`,
-`scheduler`) remain design-intent doc comments pending Phases 2–4. Carry-forward
-on-device seams (native Cgo Trash, IOKit thermals, live powermetrics) are flagged
-in `Docs/Phases.md` §1.
+The remaining engine stubs (`net`, `audit`, `optimizer`, `scheduler`) are
+design-intent doc comments pending Phases 3–4. Carry-forward on-device seams
+(native Cgo Trash, IOKit thermals, live powermetrics) are flagged in
+`Docs/Phases.md` §1.

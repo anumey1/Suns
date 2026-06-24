@@ -63,6 +63,38 @@ These are complete, building, and unit-tested under `-race` (do not redo):
 - `internal/procadmin` + hidden `__killproc` — privilege-capable killer.
 - CLI commands: `doctor`, `version`, `clean`, `restore`, `get-coffee`, `ps`.
 
+**Phase 2 — earned breadth (in progress):**
+- `internal/dedup` — APFS-conservative duplicate finder backing **`suns ashen`**
+  (the `dedup` command, renamed; `dedup` kept as a hidden alias). Three-pass
+  detection (size → 4 KB head hash → SHA-256), hardlink collapse, bundle-atomic,
+  no-follow symlinks, floor-guarded, keeper heuristic, cosmetic-xattr note, and
+  the APFS correction (shared-block files are **never** excluded; a conservative
+  space caveat is surfaced instead). Emits `FileDeleteOp`s into a sealed plan
+  through the existing gate/history/restore spine. Unit-tested under `-race`
+  (incl. real `clonefile`/`setxattr` fixtures). **2.3 below is now DONE.**
+- New concrete ops **`ServiceUnloadOp`** (🟡, `launchctl bootout` via the
+  `operation.SystemRunner` seam) and **`ReceiptForgetOp`** (🔴, `pkgutil
+  --forget`, privileged). Both pure value types; `HistoryEntry` gained
+  domain/label/plist/package-id fields. Unit-tested with a fake runner.
+- `pkg/plist` implemented: binary-safe `Decode`/`ReadInfo`/`BundleIdentifier`
+  (`howett.net/plist`), tested against binary + XML + malformed fixtures.
+- `internal/uninstaller` + **`suns nuke <app>`**: bundle-ID tracing, ~/Library +
+  launch-agent tracing, `pkgutil` harvest with the **`--file-info`
+  shared-dependency guard** (files claimed by >1 package are retained, not
+  deleted), ordered plan (ServiceUnload → FileDelete → ReceiptForget), explicit
+  UI scope bounds. Privileged execution wired through the chokepoint in
+  `root.go` (`elevatingRunner`). Engine unit-tested (guard + ordering) under
+  `-race`. **2.1 and 2.2 below are now DONE.**
+- `internal/orphans` + **`suns orphans`**: orphaned launch-agent purge. Scans the
+  user + system launchd dirs, resolves each job's executable (env-launchers
+  unwrapped; shell wrappers and relative/PATH programs declined as
+  unresolvable), skips Apple-managed jobs, and flags only when the resolved
+  absolute executable is genuinely absent. Emits bootout-before-plist-delete
+  ops; conservative bounds stated in the UI. Unit-tested under `-race`.
+- Restore hardening (§2.4): confirmed `restore` is FileDelete-only (the Phase 2
+  op kinds are excluded from `Candidates`) and added a real >50 MB sparse
+  large-object (TierLarge size+mtime) round-trip test. **2.4 below is now DONE.**
+
 ---
 
 ## 1. Carry-forward — staged seams to finish ON-DEVICE
@@ -88,11 +120,16 @@ headless test. They are **not** new phases; finish them opportunistically.
 Goal: the two highest-correctness-surface destructive features, each explicitly
 bounded and UI-honest. Build on the existing spine; add two op kinds.
 
-### 2.1 `suns nuke <app>` — Precision Uninstaller
-- **Destructive · gated.** Op kinds: **`FileDelete`** + **`ServiceUnload`**
-  (needs concrete op) + **`ReceiptForget`** (needs concrete op). Reversibility:
+### 2.1 `suns nuke <app>` — Precision Uninstaller ✅ DONE
+- **Destructive · gated.** Op kinds: **`FileDelete`** + **`ServiceUnload`** +
+  **`ReceiptForget`** (all three concrete ops now exist). Reversibility:
   files 🟢/🔴 by mode; `ServiceUnload` 🟡 (re-loadable); `ReceiptForget` 🔴.
-- **Engine:** `internal/uninstaller` (stub exists at `internal/uninstaller/doc.go`).
+- **Engine:** `internal/uninstaller` (implemented; `Plan` returns an ordered op
+  set + retained shared deps + scope bounds). CLI in `internal/cli/nuke.go`.
+- Carry-forward: privileged removal of system-location payload files (under
+  `/Library`, `/usr/local`) currently executes as the invoking user via Trash;
+  elevated payload deletion (beyond the already-privileged `ReceiptForget` and
+  system `ServiceUnload`) is a future on-device enhancement.
 - **Mechanism (the corrected teardown order — §12.15-uninstaller):**
   1. Find the app in `/Applications`, `~/Applications`, or subfolders.
   2. Read `Info.plist` **binary-safe** (`howett.net/plist`, already a dep) for
@@ -129,8 +166,13 @@ bounded and UI-honest. Build on the existing spine; add two op kinds.
   plan that excludes shared deps, executes in order, and records typed history;
   shared-dependency guard test passes.
 
-### 2.2 `ServiceUnload` op — Orphaned Launch Agent Purge (also used by clean §12.3)
+### 2.2 `ServiceUnload` op — Orphaned Launch Agent Purge ✅ DONE
 - **Destructive · gated.** 🟡 best-effort. Op: `ServiceUnload` + `FileDelete`.
+- `ServiceUnloadOp` exists, is used by `nuke`, and now backs a standalone
+  **`suns orphans`** sweep (`internal/orphans`): resolves wrappers/env-launchers,
+  declines shell-scripted/relative programs as unresolvable, skips Apple-managed
+  jobs, requires the resolved executable to be genuinely absent, and runs
+  bootout before the plist `FileDelete`.
 - **Mechanism (§12.3):** scan `~/Library/LaunchAgents`, `/Library/LaunchAgents`,
   `/Library/LaunchDaemons`; parse each plist **binary-safe** for `Program` /
   `ProgramArguments`; **resolve wrappers, shell scripts, relative program paths,
@@ -141,9 +183,14 @@ bounded and UI-honest. Build on the existing spine; add two op kinds.
 - **Explicit bounds:** documents that launchd domains, disabled states, and
   update-time regeneration can race bootout-then-remove; reports, not guarantees.
 
-### 2.3 `suns dedup [path]` — Hash-Based Duplicate Immolator
+### 2.3 `suns ashen [path...]` — Hash-Based Duplicate Immolator ✅ DONE
+- **Shipped as `suns ashen`** (renamed from `dedup`; `dedup` is a hidden alias).
 - **Destructive · gated.** Op: **`FileDelete`** · 🟢 trash / 🔴 obliterate.
-- **Engine:** `internal/dedup` (stub exists).
+- **Engine:** `internal/dedup` (implemented; `Find` returns a `Report` of groups
+  + `FileDeleteOp`s). CLI in `internal/cli/ashen.go`, registered in `root.go`.
+- All mechanism/correctness points below are implemented and unit-tested under
+  `-race`. Remaining for the TUI phase: interactive per-group keeper adjustment
+  (the CLI shows the keep/burn split and confirms at the gate).
 - **Mechanism (§12.1):** three passes — (1) group by exact byte size; (2) hash
   **first 4 KB** as a cheap discriminator; (3) full **SHA-256** only on survivors.
   Delete identity is **tiered** (§4.7).
@@ -164,14 +211,18 @@ bounded and UI-honest. Build on the existing spine; add two op kinds.
 - **Tests (§15):** hardlink, clone/shared-block (assert **not** wrongly excluded),
   bundle, xattr-normalization fixtures.
 
-### 2.4 Restore hardening
-- Extend `internal/restore` (built in Phase 1) per any gaps found with the new
-  op kinds; restore remains **FileDelete-only** (§4.8). Confirm the
-  large-object (size+mtime+inode) restore path with real >50 MB fixtures.
+### 2.4 Restore hardening ✅ DONE
+- No code change needed: `restore` is **FileDelete-only** by construction —
+  `Candidates` admits only `KindFileDelete` + Reversible + trashed, so the Phase 2
+  op kinds (`ServiceUnload`, `ReceiptForget`) are excluded (regression-tested).
+- Added a real >50 MB sparse fixture exercising the large-object
+  (size+mtime+inode, TierLarge) restore path end-to-end.
 
 **Phase 2 dependencies:** none new beyond `howett.net/plist` (present).
-**Phase 2 definition of done:** `nuke` + `dedup` shippable behind the gate with
-the shared-dependency guard and APFS-conservative dedup, all §15 tests green.
+**Phase 2 definition of done:** ✅ `ashen` (dedup) + `nuke` (uninstaller) +
+`orphans` (launch-agent purge) shippable behind the gate with the
+shared-dependency guard and APFS-conservative dedup; restore hardened; all
+engine §15 tests green under `-race`. **PHASE 2 COMPLETE.**
 
 ---
 
@@ -344,13 +395,14 @@ value-type structs implementing `Operation` (value receivers, pointer-free, so
 
 | Op | Phase | Reversibility | Identity at exec | Privilege |
 | -- | ----- | ------------- | ---------------- | --------- |
-| `ServiceUnloadOp` | 2 | 🟡 | domain + label + source plist path | chokepoint (`launchctl`) |
-| `ReceiptForgetOp` | 2 | 🔴 | package ID still installed | chokepoint (`pkgutil`) |
+| `ServiceUnloadOp` ✅ | 2 | 🟡 | domain + label + source plist path | chokepoint (`launchctl`) |
+| `ReceiptForgetOp` ✅ | 2 | 🔴 | package ID still installed | chokepoint (`pkgutil`) |
 | `RepoMaintenanceOp` | 4 | 🟡 | repo clean / no in-progress op | none |
 | `ContainerPruneOp` | 4 | 🔴 | daemon reachable | none (Docker socket) |
 | `CacheResetOp` (DNS) | 4 | 🔴 | n/a (deletion axis inert) | chokepoint (`dscacheutil`,`killall`) |
 
-`FileDeleteOp` and `ProcessKillOp` already exist.
+`FileDeleteOp`, `ProcessKillOp`, `ServiceUnloadOp`, and `ReceiptForgetOp` now
+exist. Remaining: `RepoMaintenanceOp`, `ContainerPruneOp`, `CacheResetOp`.
 
 ---
 
@@ -375,10 +427,10 @@ value-type structs implementing `Operation` (value receivers, pointer-free, so
 1. **Phase 0 — DONE.** Dangerous core proven first.
 2. **Phase 1 — DONE.** `clean` (safe-cache) + `restore` + `get-coffee` + gated
    process kill.
-3. **Phase 2 — NEXT.** Uninstaller (`nuke`) + APFS-conservative `dedup` +
-   orphaned launch-agent purge + restore hardening.
-4. **Phase 3.** `net` + `audit` read-only suites; parsing-contract layer matures;
-   `nettop` per-PID stays experimental.
+3. **Phase 2 — DONE.** Uninstaller (`nuke`) + APFS-conservative `ashen` (dedup) +
+   orphaned launch-agent purge (`orphans`) + restore hardening.
+4. **Phase 3 — NEXT.** `net` + `audit` read-only suites; parsing-contract layer
+   matures; `nettop` per-PID stays experimental.
 5. **Phase 4.** `maintain`, Docker prune, DNS flush, empty-dir + broken-symlink
    destroyers, `schedule` (launchd), quarantined `lang-strip` (last), and the
    universal-binary + codesign + notarize + Homebrew **release pipeline**.

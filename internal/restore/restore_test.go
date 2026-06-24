@@ -128,3 +128,66 @@ func TestCandidates_FiltersToReversibleTrashed(t *testing.T) {
 		t.Fatalf("Candidates = %+v, want only the trashed reversible entry", got)
 	}
 }
+
+// Restore is FileDelete-only (§4.8): the Phase 2 op kinds are never restorable,
+// even if a record carries a fate that superficially looks reversible.
+func TestCandidates_ExcludesPhase2OpKinds(t *testing.T) {
+	entries := []operation.HistoryEntry{
+		{Op: operation.KindServiceUnload, Reversible: operation.Recoverable, Fate: "unloaded", TrashPath: "/t/x", OrigPath: "/x"},
+		{Op: operation.KindReceiptForget, Reversible: operation.Irreversible, Fate: "forgotten"},
+		{Op: operation.KindFileDelete, Reversible: operation.Reversible, Fate: "trashed", OrigPath: "/keep", TrashPath: "/t/keep"},
+	}
+	got := restore.Candidates(entries)
+	if len(got) != 1 || got[0].OrigPath != "/keep" {
+		t.Fatalf("Candidates = %+v, want only the file_delete entry", got)
+	}
+}
+
+// The large-object path identifies by size+mtime+inode (no full hash, §4.7). A
+// sparse >50 MB fixture exercises VerifyContent's TierLarge branch end-to-end.
+func TestRestore_LargeObjectRoundTrip(t *testing.T) {
+	root := t.TempDir()
+	orig := filepath.Join(root, "proj", "big.img")
+	if err := os.MkdirAll(filepath.Dir(orig), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const size = identity.DefaultLargeThreshold + (1 << 20) // 51 MB, sparse
+	f, err := os.Create(orig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(size); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	id, err := identity.ComputeFile(orig, identity.DefaultLargeThreshold)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id.Tier != identity.TierLarge {
+		t.Fatalf("fixture tier = %q, want large", id.Tier)
+	}
+
+	trashDir := filepath.Join(root, "Trash")
+	if err := os.MkdirAll(trashDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	trashPath := filepath.Join(trashDir, "big.img")
+	if err := os.Rename(orig, trashPath); err != nil {
+		t.Fatal(err)
+	}
+
+	e := operation.HistoryEntry{
+		Op: operation.KindFileDelete, Reversible: operation.Reversible, Fate: "trashed",
+		OrigPath: orig, TrashPath: trashPath, Identity: &id, Size: size,
+	}
+	o := restore.Restore(e)
+	if !o.Restored {
+		t.Fatalf("large object not restored: %s", o.Reason)
+	}
+	fi, err := os.Stat(orig)
+	if err != nil || fi.Size() != size {
+		t.Fatalf("restored size = %d (err %v), want %d", fi.Size(), err, size)
+	}
+}

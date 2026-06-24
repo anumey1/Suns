@@ -38,7 +38,7 @@ type Preview struct {
 // Receipt is the outcome of Execute, fed to HistoryRecord.
 type Receipt struct {
 	Kind      OpKind
-	Fate      string // "trashed" | "obliterated" | "skipped" | "killed" | "flushed"
+	Fate      string // "trashed" | "obliterated" | "skipped" | "killed" | "flushed" | "unloaded" | "forgotten"
 	Status    string // "ok" | "skipped:<reason>" | "failed"
 	TrashPath string // for trashed files
 	Err       error  // set when Status == "failed"
@@ -70,6 +70,14 @@ type HistoryEntry struct {
 	Birth  string `json:"birth,omitempty"`
 	Exec   string `json:"exec,omitempty"`
 	Signal string `json:"signal,omitempty"`
+
+	// service_unload
+	Domain string `json:"domain,omitempty"`
+	Label  string `json:"label,omitempty"`
+	Plist  string `json:"plist,omitempty"`
+
+	// receipt_forget
+	PackageID string `json:"package_id,omitempty"`
 }
 
 // Operation is any auditable, potentially-destructive action (§4.2).
