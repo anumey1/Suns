@@ -60,5 +60,20 @@ assets/              //go:embed: logo, OUI db, safe-cache manifest, sensors.json
 
 ## Status
 
-Scaffold only — package skeletons with design-intent doc comments. No behavior
-is implemented yet. Run `go mod tidy` once the Go toolchain is installed.
+**Phase 0 (safety spine) and Phase 1 (trustworthy v1) are complete** — building
+and unit-tested under `-race`. See `Docs/Phases.md` §0 for the authoritative
+done/remaining breakdown.
+
+- **Phase 0** — `operation` (with `FileDeleteOp`/`ProcessKillOp`), value-sealing
+  `plan`, the `safety` spine (deny floor, firmlink, tiered identity, fd-anchored
+  `fsdelete`, gate, revalidate), bounded-and-degrading `trash`, `0600` JSONL
+  `history`, hardened `syscmd`, the `privilege` chokepoint, and `procctl`.
+- **Phase 1** — `clean` (safe-cache allowlist → frozen plan → gate → trash),
+  `restore`, the read-only `get-coffee` telemetry dashboard, gated process kill
+  (`ps` + hidden privileged killer), and `doctor`. CLI commands: `doctor`,
+  `clean`, `restore`, `get-coffee`, `ps`.
+
+The engine stubs (`uninstaller`, `dedup`, `net`, `audit`, `optimizer`,
+`scheduler`) remain design-intent doc comments pending Phases 2–4. Carry-forward
+on-device seams (native Cgo Trash, IOKit thermals, live powermetrics) are flagged
+in `Docs/Phases.md` §1.

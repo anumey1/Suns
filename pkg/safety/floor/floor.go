@@ -3,10 +3,17 @@
 // It is a versioned manifest of paths that nothing in the program may ever
 // delete, enforced at plan time, execution time, and every directory descent.
 // No flag, no mode, no config value, and no scheduled job can bypass it —
-// confirm_mode=on and deletion_mode=obliterate do not override it. The check is
-// purely path-based and therefore mode-independent by construction.
+// confirm_mode=on and deletion_mode=obliterate do not override it. The check
+// consults only the path and the volume the path resides on — never a mode,
+// flag, or config value — so it is mode-independent by construction.
 //
-// Leaf package: standard library only.
+// Two layers: a versioned path-prefix deny list (fast, deterministic), and a
+// volume-residence guard that denies anything on a read-only mount. The macOS
+// System Volume is mounted read-only, so the residence guard is how the §5.3
+// "anything on a System Volume" clause is enforced — by where a path physically
+// lives, not by how it is spelled.
+//
+// Leaf package: standard library + golang.org/x/sys/unix only.
 package floor
 
 import (
@@ -15,6 +22,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"golang.org/x/sys/unix"
 )
 
 // ErrDenied is returned by Check when a path is protected by the floor.
@@ -74,7 +83,28 @@ func Check(path string) error {
 		}
 		return fmt.Errorf("%w: %s", ErrDenied, prefix)
 	}
+
+	// §5.3 "anything on a System Volume": the System Volume is mounted read-only,
+	// so deny any path that physically resides on a read-only mount. This is
+	// residence-based, catching System-Volume paths that the prefix list does not
+	// enumerate (and any other read-only mount, which is correct — nothing there
+	// is deletable anyway).
+	if onReadOnlyVolume(p) {
+		return fmt.Errorf("%w: read-only system volume", ErrDenied)
+	}
 	return nil
+}
+
+// onReadOnlyVolume reports whether path resides on a read-only mount. A path that
+// cannot be stat'd (e.g. it is already gone) is treated as not-on-a-read-only
+// volume: the prefix list above and exec-time revalidation cover vanished
+// targets, and a delete of a missing path is a no-op regardless.
+func onReadOnlyVolume(path string) bool {
+	var st unix.Statfs_t
+	if err := unix.Statfs(path, &st); err != nil {
+		return false
+	}
+	return st.Flags&unix.MNT_RDONLY != 0
 }
 
 // Permits is the boolean form of Check.
