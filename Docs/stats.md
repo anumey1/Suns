@@ -636,4 +636,148 @@ chokepoint.
   (§4.8), plus the cross-cutting backlog in §10. `lang-strip` is the most
   dangerous feature (deleting `.lproj` invalidates code signatures) and is
   designed to ship last, opt-in/per-app, with a post-strip `codesign --verify`.
+
+---
+
+## 14. Other Features, Work & Safety Considerations
+
+### 14.1 Safety-related items
+
+**a) Full Disk Access (FDA) requirement.** Suns needs Full Disk Access to clean
+caches inside `~/Library`. Without it, protected paths are silently skipped
+rather than cleaned. The first-run experience should detect missing FDA, explain
+why it is needed in plain language, and offer to open
+System Settings → Privacy & Security → Full Disk Access. An **onboarding/FDA
+panel** for the TUI is in the cross-cutting backlog (§10) but not yet built.
+Without it, new users may not understand why `suns clean` finds nothing to clean
+on their machine.
+
+**b) Scheduled-cleanup pharmacy check.** When a user installs the daily
+LaunchAgent (`suns schedule install`), it runs `suns clean --scheduled` daily.
+The install command already mentions FDA is needed, but the warning should be
+more prominent: if the terminal context does not hold FDA, the scheduled run
+**silently skips every protected path**. That is a false sense of security — the
+agent looks healthy but does no real work. A future enhancement should surface
+this discrepancy, perhaps by writing a `scheduled_run` record with a distinct
+`skipped_fda` status rather than a generic `partial`.
+
+**c) `--yes` / `-y` flag brevity.** The `-y` flag bypasses the confirmation gate
+entirely. One stray keystroke (e.g. `suns clean -y` instead of `suns clean
+--dry-run`) strips the most important safety layer. Consider deprecating the
+single-letter `-y` in favour of a longer flag (`--yes` or `--yes-i-mean-it`) so
+that bypassing the gate is always a conscious, deliberate act.
+
+### 14.2 Feature gaps worth addressing
+
+**a) `suns config` command (not yet built).** There is currently no CLI way to
+view or change settings without hand-editing the YAML file at
+`~/Library/Application Support/Suns/config.yaml`. A meta-command would make the
+safety posture visible and toggleable:
+
+```
+suns config show          # "You are in SAFE mode: deathstar=OFF, jarjar=TRASH"
+suns config set jarjar obliterate
+suns config set deathstar on
+```
+
+This is low-effort but high-value — it teaches the operator the two safety axes
+and makes the current posture inspectable at a glance.
+
+**b) History rotation.** The operation history (`history.jsonl`) grows forever.
+For a long-running machine with a daily scheduled clean, it will accumulate
+hundreds of entries. It should eventually rotate: archive old entries into
+gzip-compressed, date-stamped files under the same directory. Rotation by age
+(e.g. keep 90 days live) or by size is straightforward and keeps the canonical
+log fast to read.
+
+**c) `suns restore` interactive mode.** The CLI today only lists restorable
+entries; the interactive TUI lists them as well but does not yet let you pick
+one and restore it. A simple select-then-restore flow in the TUI would make the
+undo path complete for non-CLI users.
+
+### 14.3 What is already rock-solid
+
+These mechanisms are proven, unit-tested, and are the reasons Suns can be trusted
+to handle destructive work:
+
+- **Three-layer safety apparatus** — gate (`confirm_mode`) + Trash
+  (`deletion_mode`) + deny floor (`pkg/safety/floor`) — all enforced at plan
+  time, execution time, and directory descent.
+- **TOCTOU defence.** Every operation's `ValidateAtExec` re-checks the target's
+  identity immediately before acting, defeating file-swap, directory-to-symlink
+  replacement, and PID-reuse attacks.
+- **fd-anchored obliterate.** Permanent deletion uses `openat`/`unlinkat`
+  anchored to directory file descriptors with `O_NOFOLLOW`, so a symlink swapped
+  mid-descent cannot redirect the delete outside the intended subtree.
+- **Shared-dependency guard.** `suns nuke` runs `pkgutil --file-info` on every
+  harvested payload path and **retains** (never deletes) any file claimed by more
+  than one installed package. This prevents the uninstaller from bricking
+  unrelated apps by removing a shared dylib, framework, or Audio Unit.
+- **Value-sealed plan.** `plan.Seal()` deep-copies every operation into a
+  pointer-free value form. After sealing, mutating scanner state, session state,
+  or engine buffers cannot change what the gate shows or the executor runs — the
+  preview IS the execution, structurally enforced.
+- **170 tests, all green under `-race`.** Every constructive op kind has a fake
+  runner exercising its full lifecycle (plan → validate → execute → history
+  record). Deletion tests use `t.TempDir()` only; no real destructive or
+  privileged command is ever run in a test.
+
+### 14.4 Distribution without an Apple Developer ID
+
+**No Apple Developer ID is required to make Suns distributable.** Three
+practical paths exist, none of which depend on code signing or notarisation:
+
+| Path | What the user does | Developer ID needed? |
+| --- | --- | --- |
+| **Source-only** (`git clone` + `go build`) | Clones the repo and runs `go build ./cmd/suns` | No |
+| **GitHub Releases** (pre-built binary) | Downloads a `darwin-arm64` binary, runs `chmod +x`, clears quarantine with `xattr -d com.apple.quarantine` | No |
+| **Homebrew tap** (source-build formula) | Runs `brew tap anumey1/suns && brew install suns`; Homebrew compiles from source on the user's machine | No |
+
+**What you give up without signing/notarisation:**
+
+- Without **code signing**, macOS shows a one-time "unidentified developer"
+  warning the first time the binary is launched. Right-click → Open bypasses it,
+  or the user clears the quarantine flag with `xattr`.
+- Without **notarisation**, Apple's automated malware scan is skipped, so macOS
+  adds the quarantine flag to downloaded copies. Again, a one-time `xattr` step
+  clears it.
+- A **`.pkg` installer** is impractical without signing — the installer itself
+  triggers Gatekeeper warnings. Stick to a single binary + Homebrew.
+
+**For a developer-oriented Go CLI tool, none of these are blockers.** Tools like
+`lazygit`, `btop`, `fzf`, `ripgrep`, and countless others distribute via Homebrew
+source builds or unsigned GitHub releases. Suns's target audience — developers
+and advanced macOS users — already knows how to handle an unsigned binary.
+
+### 14.5 Recommended first-run safety sequence
+
+For anyone testing Suns on their real machine for the first time, this sequence
+builds trust from read-only to destructive, one step at a time:
+
+```bash
+# 1. Build and run the environment self-check
+suns doctor
+
+# 2. Explore every read-only feature (zero risk, always safe)
+suns audit                         # SIP / Gatekeeper / FileVault posture
+suns net                           # who is listening on which ports
+suns get-coffee                    # live dashboard (q to quit)
+
+# 3. Preview destructive commands with --dry-run
+suns clean --dry-run               # what WOULD it clean?
+suns scan ~/Downloads              # what cruft is there?
+
+# 4. Create a sandbox and test against fake data
+mkdir ~/suns-sandbox
+# (populate with duplicates, empty dirs, broken symlinks — see README)
+suns ashen ~/suns-sandbox --dry-run
+suns ashen ~/suns-sandbox           # shows the gate; press Enter (= No) to abort
+
+# 5. When ready, try a real clean (gate shown by default)
+suns clean                         # previews the plan, asks [y/N]
+```
+
+The key habit: **always use `--dry-run` first** on any new command or path.
+Suns's safety defaults are strong, but the operator is the last backstop — and
+`--dry-run` gives you a risk-free preview of exactly what would happen.
 ```

@@ -3,6 +3,7 @@ package telemetry
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"io"
 	"sort"
 	"strconv"
@@ -92,7 +93,8 @@ func (ns *NetSource) run(ctx context.Context, r io.Reader, deadline time.Duratio
 		readErr = sc.Err()
 	}()
 
-	inCol, outCol := -1, -1
+	var cols nettopCols
+	colsSet := false
 	var prev, cur map[string]netRow
 	timer := time.NewTimer(deadline)
 	defer timer.Stop()
@@ -125,42 +127,98 @@ func (ns *NetSource) run(ctx context.Context, r io.Reader, deadline time.Duratio
 					prev = cur
 				}
 				cur = map[string]netRow{}
-				inCol, outCol = nettopByteCols(ln)
+				var ok bool
+				cols, ok = parseNettopHeader(ln)
+				if !ok {
+					return fmt.Errorf("nettop: cannot parse header: %q", ln[:min(len(ln), 80)])
+				}
+				colsSet = true
 				continue
 			}
-			if cur == nil || inCol < 0 || outCol < 0 {
+			if cur == nil || !colsSet {
 				continue
 			}
-			if label, row, ok := parseNetRow(ln, inCol, outCol); ok {
+			if label, row, ok := parseNetRowAny(ln, cols); ok {
 				cur[label] = row
 			}
 		}
 	}
 }
 
-// isNettopHeader reports whether a line is the CSV column header that opens each
-// nettop frame.
+// isNettopHeader reports whether a line is a column header that opens each
+// nettop frame. Accepts both CSV (time,…) and fixed-width (time   …) formats.
 func isNettopHeader(ln string) bool {
-	return strings.HasPrefix(ln, "time,")
+	return strings.HasPrefix(ln, "time,") || strings.HasPrefix(ln, "time ")
 }
 
-// nettopByteCols finds the bytes_in / bytes_out column indices from a header.
-func nettopByteCols(header string) (int, int) {
-	in, out := -1, -1
-	for i, h := range strings.Split(header, ",") {
-		switch strings.TrimSpace(h) {
-		case "bytes_in":
-			in = i
-		case "bytes_out":
-			out = i
+// nettopFmt tracks which output format nettop is producing.
+const (
+	nettopFmtCSV = iota
+	nettopFmtFixed
+)
+
+// nettopCols holds the column positions for both CSV and fixed-width formats.
+type nettopCols struct {
+	format               int
+	inIdx, outIdx        int // CSV column indices (0-based)
+	inStart, inEnd       int // FW: byte positions of bytes_in column
+	outStart, outEnd     int // FW: byte positions of bytes_out column
+}
+
+// parseNettopHeader detects the format (CSV vs fixed-width) and extracts column
+// positions. On fixed-width macOS, `nettop -P -x -l 0` produces space-aligned
+// columns where `bytes_in` and `bytes_out` are at fixed character offsets
+// determined by the header line (§13.1).
+func parseNettopHeader(header string) (nettopCols, bool) {
+	if strings.Contains(header, ",") {
+		// CSV format: `time,,interface,state,bytes_in,bytes_out,…`
+		in, out := -1, -1
+		for i, h := range strings.Split(header, ",") {
+			switch strings.TrimSpace(h) {
+			case "bytes_in":
+				in = i
+			case "bytes_out":
+				out = i
+			}
+		}
+		if in < 0 || out < 0 {
+			return nettopCols{}, false
+		}
+		return nettopCols{format: nettopFmtCSV, inIdx: in, outIdx: out}, true
+	}
+
+	// Fixed-width format: column names are space-separated but the actual data
+	// sits in fixed-width character ranges. Use byte positions of column names
+	// from the header to determine those ranges.
+	inStart := strings.Index(header, "bytes_in")
+	outStart := strings.Index(header, "bytes_out")
+	if inStart < 0 || outStart < 0 || outStart <= inStart {
+		return nettopCols{}, false
+	}
+	// bytes_in column ends where bytes_out column begins.
+	inEnd := outStart
+	// Find the end of bytes_out column: the start of the next known column name.
+	outEnd := len(strings.TrimRight(header, " "))
+	remaining := header[outStart+len("bytes_out"):]
+	for _, name := range []string{"rx_dupe", "rx_ooo", "re-tx", "rtt_avg"} {
+		if pos := strings.Index(remaining, name); pos >= 0 {
+			outEnd = outStart + len("bytes_out") + pos
+			break
 		}
 	}
-	return in, out
+	return nettopCols{format: nettopFmtFixed, inStart: inStart, inEnd: inEnd, outStart: outStart, outEnd: outEnd}, true
 }
 
-// parseNetRow parses one data row into its label and cumulative counters,
-// degrading to ok=false on anything unexpected (§13.1).
-func parseNetRow(ln string, inCol, outCol int) (string, netRow, bool) {
+// parseNetRowAny parses one data row using the format-specific column positions.
+func parseNetRowAny(ln string, cols nettopCols) (string, netRow, bool) {
+	if cols.format == nettopFmtCSV {
+		return parseNetRowCSV(ln, cols.inIdx, cols.outIdx)
+	}
+	return parseNetRowFixed(ln, cols.inStart, cols.inEnd, cols.outStart, cols.outEnd)
+}
+
+// parseNetRowCSV parses a comma-separated nettop data row.
+func parseNetRowCSV(ln string, inCol, outCol int) (string, netRow, bool) {
 	cols := strings.Split(ln, ",")
 	if len(cols) <= inCol || len(cols) <= outCol {
 		return "", netRow{}, false
@@ -181,6 +239,49 @@ func parseNetRow(ln string, inCol, outCol int) (string, netRow, bool) {
 		name: name,
 		pid:  pid,
 	}, true
+}
+
+// parseNetRowFixed parses a fixed-width nettop data row.  The format is:
+//   HH:MM:SS.ffffff <process.pid><padding> <right-aligned numeric columns…>
+// Byte positions come from the column-name locations in the header (§13.1).
+func parseNetRowFixed(ln string, inStart, inEnd, outStart, outEnd int) (string, netRow, bool) {
+	if len(ln) < 15 {
+		return "", netRow{}, false
+	}
+	ts := strings.TrimSpace(ln[:15])
+	if ts == "" || ts[0] < '0' || ts[0] > '9' {
+		return "", netRow{}, false
+	}
+	t, err := time.Parse(nettopFrameTime, ts)
+	if err != nil {
+		return "", netRow{}, false
+	}
+
+	// Process label sits between the 15-char timestamp and the bytes_in column.
+	label := strings.TrimSpace(ln[15:inStart])
+	if label == "" {
+		return "", netRow{}, false
+	}
+	name, pid := splitNettopLabel(label)
+
+	// Numeric columns are right-aligned in fixed-width ranges.
+	inVal := parseNetUint(extractCol(ln, inStart, inEnd))
+	outVal := parseNetUint(extractCol(ln, outStart, outEnd))
+
+	return label, netRow{ts: t, in: inVal, out: outVal, name: name, pid: pid}, true
+}
+
+// extractCol extracts a right-aligned value from the fixed-width column at
+// [start:end], clamping to the line length.
+func extractCol(ln string, start, end int) string {
+	if start >= len(ln) {
+		return ""
+	}
+	e := end
+	if e > len(ln) {
+		e = len(ln)
+	}
+	return strings.TrimSpace(ln[start:e])
 }
 
 // diffNetFrames differences two consecutive frames into per-process rates, sorted
