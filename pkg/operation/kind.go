@@ -15,6 +15,7 @@ const (
 	KindContainerPrune  OpKind = "container_prune"
 	KindReceiptForget   OpKind = "receipt_forget"
 	KindDNSFlush        OpKind = "dns_flush"
+	KindScheduledRun    OpKind = "scheduled_run"
 )
 
 // Reversibility is the honest, per-operation classification surfaced in the

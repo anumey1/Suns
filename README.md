@@ -109,6 +109,30 @@ done/remaining breakdown.
   - Live NET widget (EXPERIMENTAL): a supervised, unprivileged `nettop` stream
     (`internal/telemetry`) diffs consecutive frames for per-process tx/rx, shown
     in the `get-coffee` dashboard with an honest health badge (warming/stalled).
+- **Phase 4 (in progress)** — remaining destructive actions, each a typed op
+  through the gate + chokepoint:
+  - `dns-flush` (`pkg/operation/dnsflush.go`): the DNS Cache Incinerator — a single
+    irreversible `DNSFlushOp` (🔴, root) that runs
+    `dscacheutil -flushcache; killall -HUP mDNSResponder` via the chokepoint, with
+    a graceful no-privilege skip; `--dry-run`/`-y`.
+  - `scan <path...>` (`internal/purge`): read-only audit of broken symlinks +
+    empty directories (`.DS_Store`-only counts as empty), `--json`.
+  - `clean empty-dirs <path>` / `clean broken-symlinks <path...>`: the path-scoped
+    destroyers — `FileDelete` (🟢) through the gate with a mandatory scope
+    confirmation, no-follow, maximal-subtree emission for empty dirs.
+  - `maintain [path...]` (`pkg/operation/repomaintenance.go` + `internal/maintain`):
+    de-fanged git GC — lists repos with estimated savings + cleanliness, runs a
+    plain `git gc` (🟡) on clean repos through the gate, skips dirty/in-progress
+    ones, and re-confirms cleanliness at execution; `--aggressive`/`--prune-now`
+    opt-ins behind a warning.
+  - `docker-prune` (`internal/docker` + `pkg/operation/container*.go`): the Docker
+    Environment Nuke — probes Docker Desktop/Colima/OrbStack, previews reclaimable
+    space, and gates `docker system prune -a` (🔴); clean no-op when absent.
+    Volumes are preserved unless `--volumes` is given.
+  - `schedule install|uninstall|status` (`internal/scheduler`) + `clean --scheduled`:
+    authors a launchd user agent that runs the most-constrained unattended cleanup
+    (allowlist-locked, trash-forced, no prompts), writing an `ok`/`partial`/`failed`
+    `scheduled_run` record to history.
 
 The remaining engine stubs (`optimizer`, `scheduler`) are design-intent doc
 comments pending Phases 3–4. Carry-forward on-device seams (native Cgo Trash,

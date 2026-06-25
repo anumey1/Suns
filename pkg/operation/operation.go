@@ -78,6 +78,10 @@ type HistoryEntry struct {
 
 	// receipt_forget
 	PackageID string `json:"package_id,omitempty"`
+
+	// scheduled_run — a constrained unattended `clean --scheduled` summary record
+	// (§12.20). Summary is a human one-line outcome; Status is ok|partial|failed.
+	Summary string `json:"summary,omitempty"`
 }
 
 // Operation is any auditable, potentially-destructive action (§4.2).

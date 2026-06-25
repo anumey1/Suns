@@ -60,6 +60,7 @@ var pinnedTools = []string{
 	"/usr/sbin/sysctl",
 	"/bin/launchctl",
 	"/usr/bin/sudo",
+	"/usr/bin/git",
 }
 
 // Run executes all checks and returns a Report.

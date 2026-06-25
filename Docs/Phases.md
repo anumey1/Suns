@@ -127,6 +127,35 @@ These are complete, building, and unit-tested under `-race` (do not redo):
   and rendered in the NET widget with an EXPERIMENTAL label and honest health.
   **§3.3 per-PID net is now DONE.** Phase 3 is feature-complete.
 
+**Phase 4 — power features & scheduling (in progress):**
+- `pkg/operation/dnsflush.go` + **`suns dns-flush`**: the DNS Cache Incinerator —
+  a single irreversible `DNSFlushOp` (🔴, root) routed through the gate, running
+  `dscacheutil -flushcache; killall -HUP mDNSResponder` via the chokepoint, with
+  graceful no-privilege skip. Op unit-tested under `-race`. **§4.3 is now DONE.**
+  (Release engineering §4.8 + lang-strip §4.7 are deferred to a later pass.)
+- `internal/purge` + **`suns scan`** / **`suns clean empty-dirs`** /
+  **`suns clean broken-symlinks`**: the path-scoped Empty Directory Purger and
+  Broken Symlink Auditor. Read-only audit (`scan`, `--json`) lists both; the
+  destroy halves emit `FileDelete` (🟢) through the gate with a **mandatory scope
+  confirmation**. `.DS_Store`-only dirs count as empty; maximal-subtree emission;
+  no-follow. Engine unit-tested under `-race`. **§4.4 + §4.5 are now DONE.**
+- `pkg/operation/repomaintenance.go` + `internal/maintain` + **`suns maintain`**:
+  the de-fanged Git Repository GC — discovers repos, lists savings + cleanliness
+  before acting, gates the clean ones (🟡 plain `git gc`), re-confirms cleanliness
+  at exec, with `--aggressive`/`--prune-now` opt-ins behind a warning. `git`
+  pinned. Op + engine unit-tested under `-race`. **§4.1 is now DONE.**
+- `pkg/operation/container*.go` + `internal/docker` + **`suns docker-prune`**:
+  the Docker Environment Nuke — probes for Docker/Colima/OrbStack, previews
+  reclaimable space, gates `docker system prune -a` (🔴) via a `ContainerPruner`
+  seam, clean no-op when absent. Volumes opt-in (`--volumes`). Prune is an
+  on-device seam; parsers + cores unit-tested under `-race`. **§4.2 is now DONE.**
+- `internal/scheduler` + **`suns schedule`** + **`clean --scheduled`**: the
+  Scheduled Burn Daemon — authors a launchd user agent (pure plist gen + on-device
+  `launchctl`) running the most-constrained unattended clean (allowlist-locked,
+  trash-forced, no prompts) that writes an `ok`/`partial`/`failed` `scheduled_run`
+  history record. **§4.6 is now DONE.** Phase 4 in-scope work is complete;
+  `lang-strip` (§4.7) + release pipeline (§4.8) remain the deferred follow-on.
+
 ---
 
 ## 1. Carry-forward — staged seams to finish ON-DEVICE
@@ -337,61 +366,98 @@ Goal: the remaining destructive actions (each modeled as a typed op), unattended
 scheduling, the quarantined stripper, and the **release pipeline as a
 first-class task**.
 
-### 4.1 `suns maintain` — Git Repository GC (§12.17)
-- **Destructive · gated.** Op: **`RepoMaintenance`** (needs concrete op) · 🟡.
-- **Correction:** `git gc --aggressive --prune=now` across all repos drops
-  recoverable work (dropped stashes, reset commits, abandoned branches). Default
-  is **plain `git gc`** with the normal **two-week prune window**; `--aggressive`
-  + immediate prune are explicit opt-ins with a **per-repo warning**.
-- Discover repos; **list each with estimated savings before acting**; **skip
-  repos with uncommitted changes or in-progress merge/rebase**; gate the batch.
-- Identity at exec = re-confirm repo cleanliness immediately before acting.
+### 4.1 `suns maintain` — Git Repository GC (§12.17) ✅ DONE
+- **Destructive · gated.** Op: **`RepoMaintenanceOp`** (`pkg/operation/repomaintenance.go`,
+  `KindRepoMaintenance`) · 🟡. `git` pinned in `syscmd` + doctor.
+- Default is **plain `git gc`** (git's two-week reflog window); `--aggressive` and
+  `--prune-now` are explicit opt-ins surfaced with a **per-repo warning** before
+  the gate.
+- Engine `internal/maintain.Discover` walks the roots (default `.`) for `.git`,
+  **lists each repo with estimated savings** (`git count-objects -v` size +
+  size-garbage) **and cleanliness before acting**, and emits an op only for clean
+  repos. **Dirty / in-progress (merge/rebase/cherry-pick/revert/bisect) repos are
+  listed with a reason and skipped.**
+- **TOCTOU defense:** `RepoMaintenanceOp.ValidateAtExec` re-confirms cleanliness
+  (porcelain status + git-dir marker files) immediately before acting, so a repo
+  that became dirty after planning is skipped (recorded), never collected.
+- Op + engine unit-tested under `-race` (clean/dirty/merge classification, opt-in
+  flag plumbing, exec-time skip).
 
-### 4.2 Docker Environment Nuke (§12.15)
-- **Destructive · gated.** Op: **`ContainerPrune`** (needs concrete op) · 🔴.
-- **Correction:** Docker runs in a Linux VM on macOS; the default Unix socket
-  often doesn’t exist. **Probe** `~/.docker/run/docker.sock`,
-  `~/.colima/default/docker.sock`, and **OrbStack**’s endpoint before
-  initializing the SDK client (fall back to the CLI). Detect daemon-running first;
-  clear no-op message if Docker absent. Preview reclaimable space, then
-  `system prune -a --volumes` **only after the gate confirms**.
+### 4.2 Docker Environment Nuke (§12.15) ✅ DONE
+- **Destructive · gated.** Op: **`ContainerPruneOp`** (`pkg/operation/containerprune.go`,
+  `KindContainerPrune`) · 🔴. Reached through a new **`ContainerPruner` injection
+  seam** (`pkg/operation/container.go`, mirroring Trasher/SystemRunner); the
+  default refuses, the CLI wires the discovered engine just before executing.
+- Engine `internal/docker`: **probes** `~/.docker/run/docker.sock`,
+  `~/.colima/default/docker.sock`, OrbStack's socket + `/var/run/docker.sock`,
+  **locates the docker CLI** across Docker Desktop/Colima/OrbStack/Rancher install
+  paths, confirms the daemon via `docker version`, and previews reclaimable space
+  from `docker system df`. Absent/stopped engine → **clean no-op message**. Uses
+  the **CLI** (no heavy SDK dep) through `syscmd.NewWithAllowlist` so the variable
+  binary path never enters the production allowlist.
+- After the gate confirms, runs `docker system prune -a -f`. **Safe-by-default
+  deviation:** volumes (persistent data) are **excluded** unless `--volumes` is
+  given — consistent with the obliterate / `--prune-now` opt-ins. The prune
+  **execute path is an on-device seam** (no Docker in headless CI); parsers +
+  detect/prune cores unit-tested under `-race` with an injected runner.
 
-### 4.3 DNS Cache Incinerator (§12.11)
-- **Destructive(action) · gated.** Op: **`CacheReset`** (kind exists; needs
-  concrete op) · 🔴 (no undo) · **root**. `optimizer` stub exists.
-- Run `dscacheutil -flushcache; killall -HUP mDNSResponder` via the **chokepoint**
-  (`dscacheutil`/`killall` already in the privileged allowlist). The **Jarjar
-  deletion axis is inert** for it (it’s a reset, not a deletion); carries the 🔐
-  root badge.
+### 4.3 DNS Cache Incinerator (§12.11) ✅ DONE
+- **Destructive(action) · gated.** Op: **`DNSFlushOp`** (`pkg/operation/dnsflush.go`,
+  `KindDNSFlush`) · 🔴 (no undo) · **root**.
+- `Execute` runs `dscacheutil -flushcache` then `killall -HUP mDNSResponder` via
+  the injected system runner (both elevated through the **chokepoint**;
+  `dscacheutil`/`killall` already pinned). A missing privilege → `skipped`, not a
+  hard failure. The **Jarjar deletion axis is inert** (it's a reset, not a
+  deletion). CLI `suns dns-flush` (alias `dnsflush`) routes the single op through
+  the gate (🔴 shown), `--dry-run`/`-y`. Op unit-tested under `-race` with a fake
+  runner (command order + privileged flag + skip/fail paths); no real flush in
+  tests. (`KindCacheReset` stays reserved for a broader future cache reset.)
 
-### 4.4 Empty Directory Purger (§12.19)
-- **Destructive · gated.** Op: `FileDelete` · 🟢. **Post-order** (bottom-up)
-  traversal so directories emptied by removing children are caught in one pass.
-  **Always confirm the target root scope first** (“Purge empty dirs under
-  `<path>`? [y/N]”) independent of `confirm_mode`. Decide consistently whether a
-  dir containing only `.DS_Store` counts as empty.
+### 4.4 Empty Directory Purger (§12.19) ✅ DONE
+- **Destructive · gated.** Op: `FileDelete` · 🟢. Engine `internal/purge.EmptyDirs`
+  computes collapsibility **bottom-up** (deepest-first) so a dir emptied by
+  removing its children is caught in one pass, then emits **one FileDeleteOp per
+  maximal empty subtree** (trashing it subsumes the whole subtree). A dir whose
+  only content is a `.DS_Store` **counts as empty** (the user-chosen rule). The
+  named root is never itself removed; symlinks are never followed and make a dir
+  non-empty. CLI `suns clean empty-dirs <path>` **always confirms the scope**
+  independent of `confirm_mode` (only `--yes` bypasses), 🟢 gate, `--dry-run`,
+  `--jarjar`. Unit-tested under `-race` with `t.TempDir`.
 
-### 4.5 Broken Symlink Auditor (§12.18)
-- Read-only audit half lives in `suns scan`; destroy half in `suns clean`
-  (`FileDelete` · 🟢) using the **fd-anchored, no-follow deleter** (§4.6).
+### 4.5 Broken Symlink Auditor (§12.18) ✅ DONE
+- Engine `internal/purge.BrokenSymlinks`: no-follow `WalkDir`, dangling detected
+  when `os.Stat` reports the target missing (other stat errors left alone). Emits
+  `FileDelete` (🟢) per dangling link via the **fd-anchored, no-follow deleter**
+  (§4.6). Read-only audit half = **`suns scan <path...>`** (lists broken symlinks
+  + empty dirs, `--json`, `--broken-symlinks`/`--empty-dirs` filters); destroy
+  half = **`suns clean broken-symlinks <path...>`** (scope-confirmed gate).
+  Unit-tested under `-race` (dangling vs valid, no-follow, real target never
+  flagged).
 
-### 4.6 `suns schedule` — Scheduled Burn Daemon (§12.20)
-- **Destructive(authoring) · constrained.** Engine: `internal/scheduler` (stub).
-- **Correction:** user cron is deprecated → author a **`launchd` user
-  LaunchAgent** running `suns clean --scheduled`.
-- **Most-constrained mode:** locked to the **curated safe-target allowlist**;
-  `deletion_mode` **forced to `trash`** (never obliterate unattended); interactive
-  flags + config **ignored**; full history logging; note that the agent’s context
-  must have Full Disk Access or it silently skips protected paths.
-- **Failure semantics:** repeated permission denials / unavailable target / stale
-  exclusions → write a `scheduled_run` history record with status
-  `partial`/`failed`, **surfaced prominently** in CLI + TUI (never silent).
-- **No-GUI-session behavior:** with no Aqua login session, still **force trash**
-  (pure-Go `~/.Trash` fallback if the Cocoa API is unavailable headless, **never**
-  permanent delete), queue a notification for next login, and **skip** any target
-  whose trashability can’t be guaranteed rather than escalating to permanent
-  deletion.
-- Add `--scheduled` handling to the `clean` command (lock settings, ignore flags).
+### 4.6 `suns schedule` — Scheduled Burn Daemon (§12.20) ✅ DONE
+- **Destructive(authoring) · constrained.** Engine: `internal/scheduler`.
+- Authors a **`launchd` user LaunchAgent** (`com.suns.scheduled-clean`,
+  `RunAtLoad` false, daily `StartCalendarInterval`) running `suns clean
+  --scheduled`. `GeneratePlist` is pure + unit-tested (howett XML); `Install`/
+  `Uninstall`/`CheckStatus` use `launchctl bootstrap`/`bootout`/`print` in the
+  `gui/<uid>` domain (on-device). CLI `suns schedule install|uninstall|status`
+  (install confirms, `--hour`/`--minute`, resolves the binary via `os.Executable`).
+- **Most-constrained mode** (`clean --scheduled`, `runScheduledClean`): locked to
+  the safe-cache allowlist, `deletion_mode` **forced to `trash`** (obliterate
+  unreachable unattended), interactive flags + config **ignored**, no prompts,
+  full history logging. Install warns that the agent needs Full Disk Access or it
+  silently skips protected paths.
+- **Failure semantics:** discovery/trash failures and per-target skips/failures
+  roll up into a **`scheduled_run`** history record (new `KindScheduledRun` +
+  `Summary` field) with status `ok`/`partial`/`failed`, printed prominently to the
+  agent log and available for TUI surfacing — never silent.
+- **No-GUI-session behavior:** trash mode uses the existing Trasher's pure-Go
+  `~/.Trash` fallback and **skips** un-trashable targets (Fate `skipped`) rather
+  than escalating to a permanent delete — never obliterate. (A native
+  next-login notification is a future refinement; the `scheduled_run` record is
+  the durable surfacing mechanism.)
+- Op-kind + plist generation + scheduled-run classification unit-tested under
+  `-race`.
 
 ### 4.7 `suns lang-strip <app>` — Localization Stripper (§12.4) — QUARANTINED, SHIPS LAST
 - **Destructive · gated.** Op: `FileDelete` · 🔴. **Most dangerous feature.**

@@ -47,6 +47,7 @@ var productionAllowlist = map[string]string{
 	"sysctl":       "/usr/sbin/sysctl",
 	"launchctl":    "/bin/launchctl",
 	"sudo":         "/usr/bin/sudo",
+	"git":          "/usr/bin/git",
 }
 
 // Runner executes allowlisted commands under the hardening rules.
