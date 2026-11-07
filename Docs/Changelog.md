@@ -2,6 +2,32 @@
 
 Newest first. One entry per change that touched the code or `stats.md`. The status doc is `Docs/stats.md`.
 
+## 2026-11-07: stats.md overhauled to the MakeStats template
+
+- **What:** `Docs/stats.md` rebuilt into the 15 fixed sections, with every fact re-checked against the code. A
+  session now gets the project, its hazards, the verify command and open work from the header and §0–§2. Open work,
+  rulings and limitations now have stable IDs (O-1 to O-18, R-1 to R-4, L-1 to L-6).
+- **Why:** owner request (`/makestats overhaul`); the old doc had no dates, stale commit state and no IDs.
+- **Files:** `Docs/stats.md`, `Docs/Changelog.md` (new), `Docs/Legacy/stats-2026-11-07.md` (backup of the old doc)
+- **Verified:** `go build ./... && go vet ./... && go test -race -count=1 ./...` → all pass (172 test functions,
+  24 packages with tests); no code changed; not checked on a device.
+- **History moved:** the old §9 phase table, word for word, to "Older history" below.
+- **Corrections found in the old doc:**
+  - `ashen --deathstar` does not delete permanently; `--deathstar` only skips the gate. Only `--jarjar obliterate` or
+    `deletion_mode: obliterate` deletes permanently.
+  - The deny floor also protects the home directory root itself.
+  - "Every external command goes through `syscmd`" and "the single place Suns elevates" have exceptions: the
+    `nettop`/`powermetrics` streams and three sudo paths (stats.md §10.2).
+  - `doctor` checks 16 tools, not all 18 pinned ones (`killall`, `mdutil` missing; L-5).
+  - `oui.csv` has 56 vendor rows, not about 76 (that was the line count with comments).
+  - 172 test functions and 36 packages, not 170 and 34 (the nettop fix added tests).
+  - Packages without tests also include `internal/config`, `internal/optimizer`, `internal/tui/views`.
+  - The deferred work was cited as "§4.7/§4.8", which in the old doc meant `maintain` and `docker`; it is
+    `Docs/Phases.md` §4.7/§4.8.
+  - New facts the old doc lacked: a scheduled clean without Full Disk Access records `ok` (L-2); the TUI Audit
+    menu is a placeholder and Restore only lists (L-4).
+- **Closed:** none · **stats.md:** all sections
+
 ---
 
 ## Older history

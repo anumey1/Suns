@@ -15,7 +15,7 @@ model.
 | D1 Back up and inventory | Done | Backup `Docs/Legacy/stats-2026-11-07.md` (byte-identical, `cmp`) |
 | D2 Map every old section | Done | Map, empty sections and number map below |
 | D3 Move history to the changelog | Done | 1 block, 23 lines; diff check below |
-| D4 Rewrite into the template | Open | |
+| D4 Rewrite into the template | Done | 529 lines; check.sh PASS, 0 warnings; corrections below |
 | D5 Fix every reference | Open | |
 | D6 Checks | Open | |
 
@@ -180,3 +180,42 @@ Old in-doc references that point at other docs, to name in D4: §6.1, §5.3, §1
 
 Moved word for word, emoji and old section numbers included (it is a record of its time). Only *History* block in
 the map; nothing else in the old doc narrates change.
+
+## D4. Rewrite
+
+New `Docs/stats.md`: 529 lines (old 783). Sizes: header 17, §0 11, §1 54, §2 32, §3 45, §4 66, §5 38, §6 17, §7 98,
+§8 17, §9 16, §10 29, §11 31, §12 11, §13 30, §14 17. All within B4 budgets. `check.sh`: PASS, 0 warnings.
+
+Verify run (2026-11-07): `go build ./... && go vet ./... && go test -race -count=1 ./...` exit 0; 172 test
+functions, 24 packages with tests, 36 packages.
+
+Owner input: release pipeline deferred for now (2026-11-07) → R-1 in §10.1, parked in §2.
+
+### Corrections to the old doc (also in the Changelog entry)
+
+1. `ashen --deathstar` was described as permanent deletion; `--deathstar` only sets `confirm_mode` on (no gate).
+   Source: `internal/cli/ashen.go`, `clean.go`.
+2. Deny floor also protects the home directory root (`pkg/safety/floor/floor.go` `Check`).
+3. Not every external command goes through `syscmd`: `internal/tui/powerlaunch.go` streams, `procadmin` and TUI
+   `elevateCmd` use `os/exec`; elevation happens in four places (§10.2).
+4. `doctor` `pinnedTools` has 16 of the 18 allowlisted tools (`killall`, `mdutil` missing).
+5. `oui.csv`: 56 vendor rows, not ~76.
+6. 172 tests / 36 packages, not 170 / 34.
+7. Untested packages also include `internal/config`, `internal/optimizer`, `internal/tui/views`.
+8. "§4.7/§4.8" for deferred work meant `Docs/Phases.md`, not this doc.
+
+### New facts found (not in the old doc)
+
+- Scheduled clean without FDA records `ok` "nothing to clean" (`runScheduledClean` ignores `res.Skipped`; unreadable
+  dirs size 0) [inferred] → L-2, O-11.
+- TUI Audit menu is a placeholder; Get Coffee/Audit labels say "(later phase)" → L-4, O-13.
+- `nettopLauncher` comment says CSV but `-l 0` is fixed-width (`man nettop`) → O-18, §11.3 diagnosis.
+- Config file can make plain `clean` obliterate with no gate → §1.2 hazard.
+- `history.jsonl` has no version field → §6 rule: add fields, never rename.
+- `README.md` status stale → O-17.
+
+### Dropped (per the D2 map)
+
+Banner and commit-state lines (AP1, AP5); LOC counts and per-package test table (AP10); repo tree (AP3, replaced by
+the §5 map); `Operation` interface body (AP3); §14.3 prose (AP14; its claims are §1.3 rows with tests); per-engine
+test counts.

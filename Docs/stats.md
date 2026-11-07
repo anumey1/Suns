@@ -1,783 +1,529 @@
-# Suns — Project Status & Complete Technical Breakdown (`stats.md`)
-
-> **What this document is.** A single, exhaustive reference for anyone working on
-> Suns: the architecture, every package and file, the safety model, every CLI
-> command and how to use it, the data assets, the test suite, the current
-> phase-by-phase status, and what remains. It is written to be read top-to-bottom
-> by a newcomer or used as a lookup by a contributor. It reflects the repository
-> as of the most recent commit on `main` (`fa81f5f Phase 4: Maintenance`).
-
----
-
-## 0. TL;DR — what Suns is and where it stands
-
-**Suns** ("Super User Nutcase Sessions — Burn It All") is a safety-obsessed macOS
-system-maintenance utility written in Go. It cleans dev caches, uninstalls apps,
-de-duplicates files, purges filesystem cruft, audits security posture and the
-network, runs a live telemetry dashboard, and schedules unattended cleanups —
-all behind a uniform safety apparatus where **a first run with no flags can never
-permanently destroy data**.
-
-| Metric | Value |
-| --- | --- |
-| Language / module | Go 1.25 (toolchain 1.26) · `github.com/anumey1/Suns` |
-| Total Go source | ~15,600 lines across 34 packages |
-| `pkg/` (reusable spine) | ~4,770 LOC |
-| `internal/` (engines, CLI, TUI) | ~10,790 LOC |
-| Test functions | **170** across 24 test packages |
-| Test result | **all green** under `go test -race ./...` (~13 s cold) |
-| Platform | macOS (darwin), Apple Silicon + Intel |
-| Phases complete | **0, 1, 2, 3, and Phase 4 in-scope** (see §9) |
-| Deferred | `lang-strip` (§4.7) + the release pipeline (§4.8) |
-
-**Design north star:** every potentially-destructive action is a typed
-`Operation`, frozen into an immutable plan, shown through a colour-graded **gate**
-(🟢 reversible / 🟡 recoverable / 🔴 irreversible), executed only after a
-time-of-use identity re-check, and recorded in an append-only history. Privileged
-actions funnel through a single audited sudo chokepoint. External tools run
-through a hardened, allow-listed executor.
-
----
-
-## 1. Repository layout
-
-```
-Suns/
-├── cmd/suns/main.go            Entry point (wires signals → cli.Execute)
-├── assets/                     Embedded data (go:embed)
-│   ├── assets.go               embed directives
-│   ├── safe_cache.json         curated safe-cache allowlist (12 targets)
-│   ├── oui.csv                 curated MAC-vendor subset (~76 rows)
-│   └── sensors.json            board-ID → sensor-key map (IOKit, carry-forward)
-├── pkg/                        Reusable, app-agnostic safety spine
-│   ├── operation/              the typed Operation model + concrete ops
-│   ├── plan/                   immutable sealed plans
-│   ├── safety/                 deny-floor, gate, revalidate/execute
-│   │   ├── floor/  fsdelete/  identity/  firmlink/
-│   ├── trash/                  macOS Trash with pure-Go fallback + circuit breaker
-│   ├── syscmd/                 hardened external-command executor (allowlist)
-│   ├── privilege/              the single sudo chokepoint
-│   ├── plist/                  binary+XML plist reader + streaming tokenizer
-│   ├── history/                append-only JSONL operation history
-│   └── procctl/                low-level process identity + signal
-├── internal/                   App-specific engines, CLI, TUI
-│   ├── cli/                    Cobra command tree (one file per command)
-│   ├── config/                 SessionState + config load (viper)
-│   ├── scanner/                safe-cache discovery (clean)
-│   ├── dedup/                  the "ashen" duplicate finder
-│   ├── uninstaller/            "nuke" precision uninstaller
-│   ├── orphans/                orphaned launch-agent finder
-│   ├── restore/                undo trashed FileDeletes
-│   ├── purge/                  empty-dir + broken-symlink engines
-│   ├── maintain/               git-repo GC discovery
-│   ├── docker/                 container-engine detect + prune
-│   ├── scheduler/              launchd LaunchAgent authoring
-│   ├── optimizer/              (doc stub — reset-style ops live as concrete ops)
-│   ├── audit/                  security posture + auth-log analyzer
-│   ├── net/                    sockets, ports, LAN scan, bandwidth
-│   ├── telemetry/              the get-coffee data poller + supervised streams
-│   ├── procadmin/              privilege-delegated process killer
-│   ├── doctor/                 environment/capability self-check
-│   └── tui/                    Bubble Tea TUI (menu, dashboard, modals)
-│       ├── components/  theme/  views/
-└── Docs/
-    ├── SunsMasterTD.md         the v6 master technical design (source of truth)
-    ├── Phases.md               phase-by-phase plan + completion log
-    └── stats.md                ← this document
-```
-
-**Dependency direction:** `internal/*` may import `pkg/*`; `pkg/*` never imports
-`internal/*`. Concrete ops live in `pkg/operation`; the engines that *produce*
-ops live in `internal/*`; the CLI wires them together.
-
----
-
-## 2. Dependencies (`go.mod`)
-
-Direct requires (all else is indirect):
-
-| Module | Role |
-| --- | --- |
-| `github.com/spf13/cobra` | command & flag routing |
-| `github.com/spf13/viper` | config file load (once, into `SessionState`) |
-| `github.com/charmbracelet/bubbletea` | TUI runtime (Elm architecture) |
-| `github.com/charmbracelet/bubbles` | prebuilt TUI widgets (spinner, help) |
-| `github.com/charmbracelet/lipgloss` | styling & layout |
-| `github.com/shirou/gopsutil/v4` | in-process CPU/mem/disk/net/process stats |
-| `howett.net/plist` | binary + XML plist decode/encode |
-| `golang.org/x/sys` | `openat`/`unlinkat`/`statfs` for the fd-anchored deleter |
-
-Planned-but-not-yet-wired (listed in `go.mod` comments): `harmonica` (spring
-easing), `ntcharts` (braille charts), `bubblezone` (mouse). These are cosmetic
-backlog items (§10).
-
----
-
-## 3. The safety architecture (the heart of Suns)
-
-Everything destructive flows through one pipeline. Understanding this pipeline is
-understanding the project.
-
-### 3.1 The `Operation` model (`pkg/operation`)
-
-Every auditable, potentially-destructive action is a **typed value-type**
-implementing the `Operation` interface (`operation.go`):
-
-```go
-type Operation interface {
-    Kind() OpKind
-    Describe() Preview                                  // gate render payload
-    Reversibility() Reversibility                       // 🟢/🟡/🔴 intrinsic
-    ValidateAtPlan(ctx) error                           // sane at discovery?
-    ValidateAtExec(ctx) (Identity, error)               // still the same target? (TOCTOU)
-    Execute(ctx, mode Mode, id Identity) (Receipt, error)
-    HistoryRecord(Receipt) HistoryEntry
-}
-```
-
-Ops are **pure value types** (no pointers/slices/maps in fields) so that
-`plan.Seal()` can deep-copy them into a pointer-free form retaining no reference
-into live state. `plan.Seal()` panics on a pointer-receiver op — a compile-of-intent
-guard.
-
-**Op kinds** (`kind.go`):
-
-| `OpKind` | Concrete type | Default badge | Reaches the world via |
-| --- | --- | --- | --- |
-| `file_delete` | `FileDeleteOp` | 🟢 Reversible (🔴 in obliterate) | `Trasher` / `fsdelete` |
-| `process_kill` | `ProcessKillOp` | 🔴 Irreversible | `ProcessKiller` |
-| `service_unload` | `ServiceUnloadOp` | 🟡 Recoverable | `SystemRunner` → launchctl |
-| `receipt_forget` | `ReceiptForgetOp` | 🔴 Irreversible | `SystemRunner` → pkgutil |
-| `dns_flush` | `DNSFlushOp` | 🔴 Irreversible | `SystemRunner` → dscacheutil/killall |
-| `repo_maintenance` | `RepoMaintenanceOp` | 🟡 Recoverable | `SystemRunner` → git |
-| `container_prune` | `ContainerPruneOp` | 🔴 Irreversible | `ContainerPruner` → docker |
-| `cache_reset` | *(reserved)* | — | — |
-| `scheduled_run` | *(history summary record, not an op)* | — | — |
-
-**Reversibility** ∈ `Reversible` / `Recoverable` / `Irreversible`. **Mode** (the
-"Jarjar" deletion axis) ∈ `ModeTrash` / `ModeObliterate`; it applies **only** to
-`FileDelete` and is inert for every other kind.
-
-**Injection seams** (package-level, mirror each other, keep ops pure value types):
-
-- `UseTrasher(*trash.Trasher)` — FileDelete trashing (shared per batch so the
-  volume circuit-breaker spans the run).
-- `UseProcessKiller(ProcessKiller)` — own-user direct / root-or-other-user
-  delegated under sudo.
-- `UseSystemRunner(SystemRunner)` — `Run(ctx, privileged bool, name, args...)`;
-  the default refuses privileged calls (`ErrPrivilegeRequired`), so accidental
-  unelevated mutation is impossible.
-- `UseContainerPruner(ContainerPruner)` — docker prune; default refuses
-  (`ErrContainerEngineUnavailable`).
-
-`Receipt` (Execute's outcome) carries `Fate` (`trashed`/`obliterated`/`killed`/
-`flushed`/`unloaded`/`forgotten`/`collected`/`pruned`/`skipped`) and `Status`
-(`ok`/`skipped:<reason>`/`failed`). `HistoryEntry` is the typed JSONL record (one
-struct, per-kind fields populated with `omitempty`).
-
-### 3.2 The plan (`pkg/plan`)
-
-`plan.New(ops).Seal()` returns an immutable `*Plan` with a time-sortable `ID`
-(`NewID()`) and a pointer-free deep copy of the ops. The sealed plan is what the
-gate renders and the executor runs — nothing can mutate the target set between
-preview and execution.
-
-### 3.3 The gate (`pkg/safety/gate.go`)
-
-`BuildGroups(plan, mode)` groups ops by `OpKind`, computing the **effective**
-reversibility (e.g. FileDelete becomes 🔴 in obliterate mode). `Render(groups,
-maxLines)` prints the grouped preview with a single badge per group and a totals
-line. `Badge(r)` maps reversibility → `🟢 Reversible` / `🟡 Recoverable` /
-`🔴 Irreversible`. `Summarize(groups)` totals counts and reclaimable bytes.
-
-### 3.4 Revalidate + execute (`pkg/safety/revalidate.go`)
-
-`Execute(ctx, plan, mode)`:
-1. `Revalidate` runs `ValidateAtExec` on **every** op — the TOCTOU / PID-reuse
-   defense. A failed re-check is recorded as `skipped:revalidation`, never run.
-2. Surviving ops `Execute`; each `ExecResult{Op, Receipt, Entry, Skipped, Err}`
-   is returned. One bad target never aborts the batch (§6.1 partial-batch
-   semantics).
-
-### 3.5 The deny-floor (`pkg/safety/floor`)
-
-`floor.Check(path)` is the immovable backstop — **purely path-and-volume based**,
-checked at both plan and exec time by every FileDelete-ish op. It denies:
-
-- Prefix families: `/System`, `/usr` (except `/usr/local`), `/bin`, `/sbin`,
-  `/Library/Apple`, `/private/var/db`, `/cores`.
-- The filesystem root `/`.
-- The iCloud Drive mobile-documents container.
-- **Anything on a read-only System Volume** (`unix.Statfs` + `MNT_RDONLY`) —
-  closes the §5.3 "anything on a System Volume" gap structurally.
-
-`floor.Permits(path)` is the boolean form. The manifest should never contain a
-floor-protected target; the scanner skips defensively if it ever does.
-
-### 3.6 Tiered identity (`pkg/safety/identity`)
-
-`ComputeFile(path, threshold)` builds a `FileIdent`:
-- **Small regular files** → SHA-256 content hash (`TierSmall`).
-- **Directories, symlinks (never followed), and files ≥ threshold** → metadata
-  tier (size + mtime + dev + inode) (`TierLarge`).
-
-`VerifyFile(expected, current, allowDevChange)` is the exec-time gate: tier, dev
-(unless a known firmlink boundary permits it), inode, size, and either mtime
-(large) or hash (small) must all match — defeating swap/replace/PID-reuse style
-attacks. `firmlink.IsBoundary(path)` decides when a device-number change is an
-OS-synthesized firmlink crossing rather than a swap.
-
-### 3.7 The fd-anchored deleter (`pkg/safety/fsdelete`)
-
-`Obliterate(path, expected)` performs permanent deletion using **no-follow,
-fd-anchored** syscalls (`openat`/`unlinkat` via `x/sys/unix`), re-verifying
-identity at the descriptor so a symlink swapped in mid-operation cannot redirect
-the delete. Trash mode never reaches here; obliterate does.
-
-### 3.8 The Trasher (`pkg/trash`)
-
-`trash.New()` returns a `Trasher` that moves files to the macOS Trash. Layers:
-- A **native Cgo path** (`native.go`) — `NSFileManager trashItemAtURL:` — is the
-  intended fast path (currently a carry-forward seam).
-- A **pure-Go `~/.Trash` fallback** that never permanently deletes; if a target's
-  trashability cannot be guaranteed it is **skipped**, never escalated to delete.
-- A **volume-scoped circuit breaker** (`breaker.go`): repeated failures on a
-  volume trip it so a hung/failing volume can't stall a whole batch.
-- A **killable volume probe** (`probe.go`) — carry-forward seam for hang
-  detection.
-
-### 3.9 The privilege chokepoint (`pkg/privilege`)
-
-`Chokepoint` is the **single** place Suns elevates. Per-workflow sudo ticket;
-`Acquire` prompts once via a `Prompter` (`TerminalPrompter` in the CLI); `Run`
-executes an allow-listed pinned command under sudo. Errors are typed
-(`ErrCanceled`, `ErrExpired`, `ErrActionNotAllowed`). The CLI's `elevatingRunner`
-(`internal/cli/system_runner.go`) adapts it to the op `SystemRunner` seam:
-unprivileged reads go direct through `syscmd`, privileged mutations go through the
-chokepoint, and cancel/expire map to `ErrPrivilegeRequired` (graceful skip).
-
-### 3.10 The hardened executor (`pkg/syscmd`)
-
-Every external command — privileged or not — goes through a `Runner`:
-- **Absolute pinned paths** (no `$PATH` lookup → no hijack).
-- **Scrubbed env** with `LC_ALL=C` (locale-deterministic, parseable output).
-- **No shell** (`exec.Command` with an arg slice → no shell injection).
-- **Compile-time allowlist** (`productionAllowlist`) — a non-listed command is a
-  programming error (`ErrNotAllowed`).
-- **Bounded output** (8 MiB cap, truncation flagged) and a context deadline.
-
-`New()` uses the production allowlist; `NewWithAllowlist(map)` is used for tests
-and for the **discovered docker binary** (so a variable path never enters the
-production allowlist). Pinned tools: `lsof, arp, nettop, powermetrics, pkgutil,
-dscacheutil, killall, log, csrutil, spctl, fdesetup, mdutil, pmset, vm_stat,
-sysctl, launchctl, sudo, git`.
-
-### 3.11 The history (`pkg/history`)
-
-Canonical record at `~/Library/Application Support/Suns/history.jsonl` (mode
-0600, append-only JSON Lines, one self-contained object per line). `Open`/`Append`/
-`ReadAll`. **Full fidelity** (real paths) because restore depends on it;
-`ExportRedacted(src,dst)` produces a redacted copy on demand (home-relative path
-hashing, process-name elision) without weakening the canonical record.
-
----
-
-## 4. Engines (`internal/*`) — feature by feature
-
-Each engine is read-only at heart: it **discovers** and returns typed structs +
-the `Operation`s to run; the CLI renders the gate and calls `safety.Execute`.
-Every engine takes an injectable runner where it scrapes a tool, so tests use
-fixtures.
-
-### 4.1 `scanner` — safe-cache discovery (powers `clean`)
-- `LoadSafeCacheManifest()` parses the embedded `assets/safe_cache.json`.
-- `Discover(ctx, targets, opts)` stats each allowlist target, computes
-  reclaimable size + tiered identity, and emits `FileDeleteOp`s. Opt-in targets
-  (e.g. iOS DeviceSupport) excluded unless `IncludeOptIn`. Floor-protected
-  targets skipped defensively. **Read-only.**
-
-### 4.2 `dedup` — the "ashen" duplicate finder (powers `ashen`)
-- `Find(ctx, roots, opts) → Report`. Three-pass: size → 4 KB head → SHA-256.
-  Collapses hardlinks (never offered), bundle-atomic (`.app` treated as a unit),
-  never follows symlinks, floor-guarded, APFS shared-block clones never excluded,
-  keeper heuristic picks which copy to retain, cosmetic xattr differences
-  normalized. Emits `FileDeleteOp`s for the redundant copies. Theme: "ash is
-  largely carbon; burnt carbon copies lie in an ashen state." **9 tests.**
-
-### 4.3 `uninstaller` — "nuke" precision uninstaller
-- `Plan(ctx, target, opts) → Result`. Resolves the app, reads its bundle ID
-  (binary-safe plist), traces `~/Library` support files + launch agents, and for
-  `.pkg`-installed apps harvests the payload via `pkgutil --files`, runs
-  `pkgutil --file-info` per path and **retains files claimed by >1 package**
-  (shared-dependency guard, prevents bricking other apps). Emits ordered ops:
-  `ServiceUnload` → `FileDelete` → `ReceiptForget`. Reports explicit scope
-  bounds; never claims a "complete uninstall."
-
-### 4.4 `orphans` — orphaned launch-agent finder
-- `Find(ctx, opts) → Report`. Resolves each LaunchAgent's `Program`/
-  `ProgramArguments` (env-launchers unwrapped, shell wrappers + relative paths
-  declined, Apple-managed skipped) and flags only **genuinely-absent absolute
-  executables**. Emits `FileDelete`s for the dead plists.
-
-### 4.5 `restore` — undo trashed FileDeletes
-- `Candidates(entries)` filters history to **reversible, trashed FileDeletes
-  only** (Phase-2 op kinds explicitly excluded). `Restore(entry) → Outcome`
-  moves the item back, recreating missing parents and restoring alongside on a
-  name collision; refuses a tampered trash entry. **7 tests** incl. a >50 MB
-  sparse round-trip.
-
-### 4.6 `purge` — empty-dir + broken-symlink engines
-- `EmptyDirs(ctx, root, opts)` — collapsibility computed **bottom-up**; a dir is
-  empty when every entry is a `.DS_Store` or an already-collapsible subdir
-  (`.DS_Store`-only counts as empty). Emits **one FileDeleteOp per maximal empty
-  subtree** (trashing it subsumes the rest). Never removes the named root; no-follow.
-- `BrokenSymlinks(ctx, roots, opts)` — no-follow walk; dangling detected when
-  `os.Stat` reports the target missing (other stat errors left alone). Emits a
-  FileDelete per dangling link. **6 tests.**
-
-### 4.7 `maintain` — git-repo garbage collection
-- `Discover(ctx, runner, roots, opts) → Result`. Walks for `.git`, estimates
-  savings (`git count-objects -v` size + size-garbage), assesses cleanliness
-  (`git status --porcelain` + merge/rebase/cherry-pick/revert/bisect marker
-  files), and emits a `RepoMaintenanceOp` **only for clean repos** — dirty ones
-  are listed with a reason. The op's `ValidateAtExec` re-confirms cleanliness
-  immediately before `git gc`. **2 tests.**
-
-### 4.8 `docker` — container-engine detect + prune
-- `Detect(ctx) → Status`. Probes sockets (`~/.docker/run`, `~/.colima/default`,
-  OrbStack, `/var/run`), locates the docker CLI across Docker Desktop / Colima /
-  OrbStack / Rancher install paths, confirms the daemon (`docker version`), and
-  estimates reclaimable space from `docker system df`. Absent/stopped → clean
-  no-op.
-- `NewPruner(bin)` runs `docker system prune -a -f [--volumes]` through
-  `syscmd.NewWithAllowlist`. The prune execute path is an **on-device seam**;
-  parsers (`parseHumanSize`, `parseReclaimable`, `parseReclaimedLine`) + detect/
-  prune cores are unit-tested with an injected runner. **7 tests.**
-
-### 4.9 `scheduler` — launchd LaunchAgent authoring
-- `GeneratePlist(cfg) → []byte` (pure, howett XML): `com.suns.scheduled-clean`,
-  `RunAtLoad` false, daily `StartCalendarInterval`, args `clean --scheduled`,
-  logs under `~/Library/Logs/Suns/`. `Install`/`Uninstall`/`CheckStatus` use
-  `launchctl bootstrap`/`bootout`/`print` in `gui/<uid>` (on-device). **4 tests.**
-
-### 4.10 `audit` — security posture + auth-log analyzer
-- `Posture(ctx, runner) → Report`. SIP (`csrutil status`), Gatekeeper
-  (`spctl --status`), FileVault (`fdesetup status`), XProtect version (plist) →
-  per-finding severity (ok/warn/risk/unknown) + worst-of overall. Parsers degrade
-  to `unknown`.
-- `AuthLog(ctx, runner, opts) → AuthReport`. Queries the unified log
-  (`log show --style json --predicate 'process=="sudo"' --last <since> --info`),
-  classifies success/failure/denied, detects per-user rapid-failure bursts
-  (≥3 in 60 s). **11 tests.**
-
-### 4.11 `net` — sockets, ports, LAN, bandwidth
-- `Sockets(ctx, runner, opts) → Report`. Parses `lsof -i -n -P -F` field mode →
-  PID→app→addr:port, classifies listening sockets by scope
-  (wildcard/loopback/specific) and flags externally-reachable ports.
-- `LANScan(ctx, runner, opts) → LANReport`. Parses `arp -a -n` (skips
-  incomplete/broadcast/multicast), OUI vendor lookup (curated subset), reverse
-  DNS, optional warn-gated active TCP probe.
-- `Bandwidth(ctx, runner, opts) → BWReport`. Reliable per-interface rates
-  (gopsutil counter delta over a window) + **experimental** per-process tx/rx by
-  differencing a two-sample `nettop` capture (degrades cleanly). **14 tests.**
-
-### 4.12 `telemetry` — the get-coffee data layer
-- `Poller` samples once per cadence and publishes an immutable `SystemSnapshot`
-  via `atomic.Pointer` (every widget reads the same snapshot; no per-widget
-  polling). Cheap sources (CPU per-core, memory + swap + pressure, disk usage
-  across **all mounted physical volumes**, disk I/O rates, host uptime/load, top
-  processes, battery via pmset) are live; heavy/root sources show honest
-  staleness/Unavailable badges until elevated.
-- `PowerSource` — supervised, deadline-guarded `powermetrics -f plist` stream
-  (GPU/thermal/power), launched after `e` elevate.
-- `NetSource` — supervised, unprivileged `nettop -P -x -l 0` stream diffed into
-  per-process tx/rx for the **experimental** live NET widget; stall → relaunch.
-- `iokit.go` / `battery.go` — IOKit thermals (carry-forward Cgo seam) and pmset
-  battery parsing. **13 tests.**
-
-### 4.13 Supporting engines
-- `procadmin` — `Killer` adapting `pkg/procctl` to the op `ProcessKiller` seam
-  (own-user direct, root/other-user delegated under sudo).
-- `doctor` — `Run(ctx) → Report` of environment checks: platform, Go runtime,
-  home/trash/history dirs, pinned external tools present, Full Disk Access.
-- `config` — `SessionState` (confirm_mode, deletion_mode) + `Load(overrides)`
-  (viper file merge with precedence). `optimizer` is a doc-only stub (its
-  reset-style actions ship as concrete ops, e.g. `DNSFlushOp`).
-
----
-
-## 5. The CLI (`internal/cli`) — every command
-
-Built with Cobra. Running `suns` with **no subcommand** launches the interactive
-TUI. The root wires the privilege-capable seams at startup:
-`UseProcessKiller(procadmin.New())` and `UseSystemRunner(newElevatingRunner())`.
-
-| Command | Destructive? | Badge | Summary |
-| --- | --- | --- | --- |
-| `suns` (no args) | — | — | Launch the interactive TUI |
-| `suns doctor` | no | — | Environment & capability self-check |
-| `suns clean` | yes | 🟢/🔴 | Trash dev caches from the safe-cache allowlist |
-| `suns clean empty-dirs <path>` | yes | 🟢 | Purge empty dirs (`.DS_Store`-only = empty), scope-confirmed |
-| `suns clean broken-symlinks <path...>` | yes | 🟢 | Remove dangling symlinks, scope-confirmed |
-| `suns clean --scheduled` | yes | 🟢 | Constrained unattended mode (launchd agent) |
-| `suns scan <path...>` | no | — | Audit broken symlinks + empty dirs (`--json`) |
-| `suns ashen [path...]` | yes | 🟢/🔴 | Duplicate finder (Trash default; obliterate opt-in) |
-| `suns nuke <app>` | yes | 🟡🔴 | Precision uninstall: bundle + support + agents + receipts |
-| `suns orphans` | yes | 🟢 | Purge launch agents whose executable is gone |
-| `suns restore` | no (undo) | — | List & restore trashed FileDeletes |
-| `suns maintain [path...]` | yes | 🟡 | Safe `git gc` across clean repos |
-| `suns docker-prune` | yes | 🔴 | `docker system prune -a` (volumes opt-in) |
-| `suns dns-flush` | yes (root) | 🔴 | Flush DNS cache + restart mDNSResponder |
-| `suns schedule install\|uninstall\|status` | authoring | — | Manage the launchd cleanup agent |
-| `suns audit` (alias `secure`) | no | — | SIP/Gatekeeper/FileVault/XProtect posture (`--json`) |
-| `suns audit logs` | no (root) | — | Sudo/auth-log timeline + burst detection (`--json`) |
-| `suns net` | no | — | Socket map + open-port reachability audit (`--json`) |
-| `suns net lan` | no | — | LAN device discovery (warn-gated `--probe`) |
-| `suns net bw` | no | — | Per-interface + experimental per-process bandwidth |
-| `suns ps` | no | — | Process listing (kill is gated) |
-| `suns get-coffee` | no | — | Live telemetry dashboard (TUI) |
-
-**Common destructive-command flags:** `--dry-run` (print the frozen plan, change
-nothing), `-y/--yes` (bypass the confirmation), `--deathstar` (confirm_mode on:
-execute immediately), `--jarjar trash|obliterate` (deletion mode). Read-only
-commands support `--json`.
-
-**The confirmation gate in the CLI:** by default `clean`/`ashen`/`nuke`/etc. show
-the colour-graded gate and require a `[y/N]` confirm (defaulting to No). Scope
-purges (`empty-dirs`/`broken-symlinks`) always confirm the named scope
-independent of `confirm_mode`. `dns-flush`/`docker-prune`/`maintain` acquire root
-or wire their executor only after the gate confirms.
-
----
-
-## 6. The TUI (`internal/tui`)
-
-Bubble Tea (Elm architecture): `model` holds screen state; `Update` handles
-messages; `View` renders. Screens: a **menu** (Clean / Restore / Get Coffee /
-Audit / Doctor / Quit), the **get-coffee dashboard**, result and modal screens.
-
-**The dashboard** (`dashboard.go`) renders from the latest `SystemSnapshot`:
-tiles for CPU, MEMORY, GPU, THERMAL, DISK I/O, DISK `<fullest volume>`, BATTERY,
-POWER — each with a live value + sparkline/gauge and a **health badge** (🟢 live /
-⚠ stale / ⚠ N/A) so dead data is never shown as live. Below: an experimental NET
-widget (top per-process talkers from the supervised nettop stream, labelled
-experimental, honest warming/stalled state) and a top-processes table.
-
-**Keys:** `↑/↓` select · `k` kill (gated through the same op pipeline) · `e`
-elevate (starts the supervised powermetrics stream) · `p` pause · `esc` back.
-
-`components/` holds the sparkline/gauge renderers (block-element today;
-braille/ntcharts is backlog). `theme/` holds the colour palette + NO_COLOR
-handling.
-
----
-
-## 7. Data assets (`assets/`, `go:embed`)
-
-| File | Contents |
-| --- | --- |
-| `safe_cache.json` | The curated safe-cache allowlist — **12 targets**: npm, yarn, pnpm, go-mod, pip, Xcode DerivedData, CocoaPods, Carthage, SwiftPM, Gradle, Homebrew (all `opt_in:false`), and iOS DeviceSupport (`opt_in:true`, with a rebuild-cost warning). Each carries a `rebuild_cost` tag (cheap/moderate/expensive). |
-| `oui.csv` | ~76-row curated MAC-vendor subset (Apple/Intel/common router+IoT) for the LAN scanner; unknown OUIs render "unknown vendor". |
-| `sensors.json` | board-ID → sensor-key map for IOKit thermals (carry-forward seam). |
-
-The safe-cache manifest is the **only** thing `clean` will ever touch — nothing
-outside the allowlist, and the deny-floor can't be bypassed.
-
----
-
-## 8. Testing
-
-- **170 test functions** across 24 test packages; **all green** under
-  `go test -race ./...` (≈13 s cold, ms cached).
-- Conventions: every test runs under `-race`; deletion/trash tests use only
-  `t.TempDir()`; engines that scrape tools are tested with **injected fake
-  runners + captured fixtures** (lsof field output, nettop two-sample frames,
-  `log show` JSON, git porcelain, docker `system df`); no real destructive or
-  privileged command is ever run in a test.
-
-**Per-package test counts (highest first):**
-
-| Package | Tests | Package | Tests |
-| --- | --- | --- | --- |
-| `pkg/operation` | 31 | `internal/orphans` | 7 |
-| `internal/net` | 14 | `internal/restore` | 7 |
-| `internal/tui` | 14 | `pkg/plist` | 7 |
-| `internal/telemetry` | 13 | `internal/purge` | 6 |
-| `internal/audit` | 11 | `pkg/safety/floor` | 6 |
-| `internal/dedup` | 9 | `pkg/privilege` | 4 |
-| `internal/docker` | 7 | `pkg/plan` / `trash` / `syscmd` | 4 each |
-| `internal/scheduler` | 4 | `pkg/history` / `scanner` / `components` | 3 each |
-| `internal/maintain` / `uninstaller` / `safety` / `fsdelete` | 2–3 | | |
-
-> **Note:** `internal/cli`, `internal/tui/theme`, `internal/doctor`,
-> `internal/procadmin`, `pkg/procctl`, `pkg/safety/identity`, and
-> `pkg/safety/firmlink` have no dedicated `_test.go` files yet — they are
-> exercised indirectly (CLI via the engines, identity/firmlink via the op and
-> floor tests). Direct unit tests for these are the most obvious testing backlog.
-
-**How to run:** `go build ./...` · `go vet ./...` · `go test -race ./...`.
-
----
-
-## 9. Phase-by-phase status
-
-| Phase | Scope | Status |
-| --- | --- | --- |
-| **0** | Safety spine proven first (operation/plan/floor/fsdelete/identity/trash/syscmd/history) | ✅ Done |
-| **1** | `clean` (safe-cache) + `restore` + `get-coffee` dashboard + gated process kill | ✅ Done |
-| **2** | `ashen` (dedup) + `nuke` (uninstaller) + `orphans` + restore hardening | ✅ Done |
-| **3** | Read-only inspection: `net` (sockets/ports/LAN/bw) + `audit` (posture/auth-log); multi-volume disk + live experimental NET widget | ✅ Done |
-| **4** | Power features + scheduling — see breakdown below | ✅ In-scope done |
-
-**Phase 4 increments:**
-
-| § | Feature | Status |
-| --- | --- | --- |
-| 4.1 | `suns maintain` — git GC (`RepoMaintenanceOp`, `git` pinned) | ✅ |
-| 4.2 | `suns docker-prune` — container nuke (`ContainerPruneOp` + `ContainerPruner` seam) | ✅ |
-| 4.3 | `suns dns-flush` — DNS incinerator (`DNSFlushOp`, root) | ✅ |
-| 4.4 | `suns clean empty-dirs` — empty-directory purger | ✅ |
-| 4.5 | `suns scan` + `clean broken-symlinks` — broken-symlink auditor | ✅ |
-| 4.6 | `suns schedule` + `clean --scheduled` — scheduled burn daemon | ✅ |
-| 4.7 | `suns lang-strip` — localization stripper (quarantined, ships last) | ⏸ Deferred |
-| 4.8 | Release pipeline — universal binary, signing, notarization, `.pkg`, Homebrew | ⏸ Deferred |
-
-§4.7/§4.8 are deferred by decision: they need Apple Developer credentials +
-on-device signing/notarization. They are the natural next pass.
-
----
-
-## 10. Carry-forward seams & backlog
-
-**On-device seams** (built correct, degrade gracefully, finish opportunistically —
-they need real hardware/root/Docker a headless test can't exercise):
-
-| Item | Where | What remains |
-| --- | --- | --- |
-| Native Cgo Trash | `pkg/trash/native.go` | `NSFileManager trashItemAtURL:` ahead of the pure-Go fallback |
-| Killable volume probe | `pkg/trash/probe.go` | Hang-detection helper subprocess + integration test |
-| IOKit thermals (Cgo) | `internal/telemetry/iokit.go` | Bounded IOKit reads using `sensors.json` |
-| Live powermetrics | `internal/tui/powerlaunch.go` | Validate the `sudo -n powermetrics` stream end-to-end |
-| Battery extras | `internal/telemetry/battery.go` | wattage / cycle / health via ioreg |
-| Docker prune execute | `internal/docker` | Validate the real prune on a machine with Docker |
-| launchd load | `internal/scheduler` | Validate `bootstrap`/`bootout` on-device |
-
-**Cross-cutting backlog** (master §5): `suns config get|set|show`; history
-size-cap rotation + gzip archives; onboarding/FDA panel; braille charts
-(ntcharts) with block fallback; harmonica motion; bubblezone mouse; truecolor
-detection; direct unit tests for `cli`/`doctor`/`identity`/`firmlink`.
-
----
-
-## 11. How to build, run, and use
-
-**Build / verify:**
-```
-go build ./...          # compile everything
-go vet ./...            # static checks
-go test -race ./...     # full suite under the race detector
-go run ./cmd/suns ...   # run without installing
-```
-
-**Safe ways to explore (read-only, no changes):**
-```
-suns doctor                         # environment self-check
-suns audit                          # security posture (add --json)
-suns net                            # who owns which socket; exposed ports
-suns net lan                        # LAN devices (passive)
-suns net bw                         # bandwidth (per-interface + experimental)
-suns scan ~/Projects                # broken symlinks + empty dirs, no deletion
-suns clean --dry-run                # preview the cache plan, change nothing
-suns ashen --dry-run ~/Downloads    # preview duplicates
-suns maintain --dry-run ~/code      # preview git-gc candidates
-suns docker-prune --dry-run         # detect + preview (no-op if Docker absent)
-suns get-coffee                     # live dashboard (press e to elevate, q to quit)
-```
-
-**Destructive actions** always preview a colour-graded gate and ask before
-acting (unless `-y`/`--deathstar`). Trash is the default everywhere; permanent
-deletion (`--jarjar obliterate` / `ashen --deathstar`) is an explicit opt-in.
-`restore` undoes any trashed FileDelete. For an interactive session run `suns`
-with no arguments.
-
-**Privileged actions** (`dns-flush`, `audit logs`, `nuke` of `.pkg` daemons, the
-scheduled agent) ask for an admin password once, at execution, through the single
-chokepoint.
-
----
-
-## 12. Conventions for contributors
-
-- **New destructive action?** Model it as an `Operation` value type in
-  `pkg/operation` (pure fields), reach the world through an injection seam, and
-  route it through `plan.New().Seal()` → `safety.BuildGroups/Render` →
-  `safety.Execute`. Re-verify the target in `ValidateAtExec` (TOCTOU). Record a
-  typed `HistoryEntry`.
-- **New external tool?** Pin it in `pkg/syscmd` (`productionAllowlist`) + add it
-  to `internal/doctor`'s `pinnedTools`. Write a parsing contract (§13.1): expected
-  format, defensive field parsing, degrade to empty/unknown on the unexpected,
-  unit-tested against a captured fixture via an injected runner.
-- **Package docs** live in `doc.go` (avoid the duplicate-package-comment vet
-  error). Match the surrounding comment density and idiom.
-- **Tests** run under `-race`; deletion tests use only `t.TempDir()`; never run a
-  real destructive or privileged command in a test.
-- **Read the source of truth:** `Docs/SunsMasterTD.md` (the v6 master design) and
-  `Docs/Phases.md` (the running completion log).
-
----
-
-## 13. Current working state
-
-- Branch `main`, latest commit `fa81f5f Phase 4: Maintenance`; working tree clean
-  at the time of writing.
-- All of Phases 0–4 (in-scope) implemented, building, vetting, and passing
-  `go test -race ./...`.
-- Immediate next work: the deferred `lang-strip` (§4.7) and the release pipeline
-  (§4.8), plus the cross-cutting backlog in §10. `lang-strip` is the most
-  dangerous feature (deleting `.lproj` invalidates code signatures) and is
-  designed to ship last, opt-in/per-app, with a post-strip `codesign --verify`.
-
----
-
-## 14. Other Features, Work & Safety Considerations
-
-### 14.1 Safety-related items
-
-**a) Full Disk Access (FDA) requirement.** Suns needs Full Disk Access to clean
-caches inside `~/Library`. Without it, protected paths are silently skipped
-rather than cleaned. The first-run experience should detect missing FDA, explain
-why it is needed in plain language, and offer to open
-System Settings → Privacy & Security → Full Disk Access. An **onboarding/FDA
-panel** for the TUI is in the cross-cutting backlog (§10) but not yet built.
-Without it, new users may not understand why `suns clean` finds nothing to clean
-on their machine.
-
-**b) Scheduled-cleanup pharmacy check.** When a user installs the daily
-LaunchAgent (`suns schedule install`), it runs `suns clean --scheduled` daily.
-The install command already mentions FDA is needed, but the warning should be
-more prominent: if the terminal context does not hold FDA, the scheduled run
-**silently skips every protected path**. That is a false sense of security — the
-agent looks healthy but does no real work. A future enhancement should surface
-this discrepancy, perhaps by writing a `scheduled_run` record with a distinct
-`skipped_fda` status rather than a generic `partial`.
-
-**c) `--yes` / `-y` flag brevity.** The `-y` flag bypasses the confirmation gate
-entirely. One stray keystroke (e.g. `suns clean -y` instead of `suns clean
---dry-run`) strips the most important safety layer. Consider deprecating the
-single-letter `-y` in favour of a longer flag (`--yes` or `--yes-i-mean-it`) so
-that bypassing the gate is always a conscious, deliberate act.
-
-### 14.2 Feature gaps worth addressing
-
-**a) `suns config` command (not yet built).** There is currently no CLI way to
-view or change settings without hand-editing the YAML file at
-`~/Library/Application Support/Suns/config.yaml`. A meta-command would make the
-safety posture visible and toggleable:
-
-```
-suns config show          # "You are in SAFE mode: deathstar=OFF, jarjar=TRASH"
-suns config set jarjar obliterate
-suns config set deathstar on
-```
-
-This is low-effort but high-value — it teaches the operator the two safety axes
-and makes the current posture inspectable at a glance.
-
-**b) History rotation.** The operation history (`history.jsonl`) grows forever.
-For a long-running machine with a daily scheduled clean, it will accumulate
-hundreds of entries. It should eventually rotate: archive old entries into
-gzip-compressed, date-stamped files under the same directory. Rotation by age
-(e.g. keep 90 days live) or by size is straightforward and keeps the canonical
-log fast to read.
-
-**c) `suns restore` interactive mode.** The CLI today only lists restorable
-entries; the interactive TUI lists them as well but does not yet let you pick
-one and restore it. A simple select-then-restore flow in the TUI would make the
-undo path complete for non-CLI users.
-
-### 14.3 What is already rock-solid
-
-These mechanisms are proven, unit-tested, and are the reasons Suns can be trusted
-to handle destructive work:
-
-- **Three-layer safety apparatus** — gate (`confirm_mode`) + Trash
-  (`deletion_mode`) + deny floor (`pkg/safety/floor`) — all enforced at plan
-  time, execution time, and directory descent.
-- **TOCTOU defence.** Every operation's `ValidateAtExec` re-checks the target's
-  identity immediately before acting, defeating file-swap, directory-to-symlink
-  replacement, and PID-reuse attacks.
-- **fd-anchored obliterate.** Permanent deletion uses `openat`/`unlinkat`
-  anchored to directory file descriptors with `O_NOFOLLOW`, so a symlink swapped
-  mid-descent cannot redirect the delete outside the intended subtree.
-- **Shared-dependency guard.** `suns nuke` runs `pkgutil --file-info` on every
-  harvested payload path and **retains** (never deletes) any file claimed by more
-  than one installed package. This prevents the uninstaller from bricking
-  unrelated apps by removing a shared dylib, framework, or Audio Unit.
-- **Value-sealed plan.** `plan.Seal()` deep-copies every operation into a
-  pointer-free value form. After sealing, mutating scanner state, session state,
-  or engine buffers cannot change what the gate shows or the executor runs — the
-  preview IS the execution, structurally enforced.
-- **170 tests, all green under `-race`.** Every constructive op kind has a fake
-  runner exercising its full lifecycle (plan → validate → execute → history
-  record). Deletion tests use `t.TempDir()` only; no real destructive or
-  privileged command is ever run in a test.
-
-### 14.4 Distribution without an Apple Developer ID
-
-**No Apple Developer ID is required to make Suns distributable.** Three
-practical paths exist, none of which depend on code signing or notarisation:
-
-| Path | What the user does | Developer ID needed? |
-| --- | --- | --- |
-| **Source-only** (`git clone` + `go build`) | Clones the repo and runs `go build ./cmd/suns` | No |
-| **GitHub Releases** (pre-built binary) | Downloads a `darwin-arm64` binary, runs `chmod +x`, clears quarantine with `xattr -d com.apple.quarantine` | No |
-| **Homebrew tap** (source-build formula) | Runs `brew tap anumey1/suns && brew install suns`; Homebrew compiles from source on the user's machine | No |
-
-**What you give up without signing/notarisation:**
-
-- Without **code signing**, macOS shows a one-time "unidentified developer"
-  warning the first time the binary is launched. Right-click → Open bypasses it,
-  or the user clears the quarantine flag with `xattr`.
-- Without **notarisation**, Apple's automated malware scan is skipped, so macOS
-  adds the quarantine flag to downloaded copies. Again, a one-time `xattr` step
-  clears it.
-- A **`.pkg` installer** is impractical without signing — the installer itself
-  triggers Gatekeeper warnings. Stick to a single binary + Homebrew.
-
-**For a developer-oriented Go CLI tool, none of these are blockers.** Tools like
-`lazygit`, `btop`, `fzf`, `ripgrep`, and countless others distribute via Homebrew
-source builds or unsigned GitHub releases. Suns's target audience — developers
-and advanced macOS users — already knows how to handle an unsigned binary.
-
-### 14.5 Recommended first-run safety sequence
-
-For anyone testing Suns on their real machine for the first time, this sequence
-builds trust from read-only to destructive, one step at a time:
+# Suns: status
+
+> Safety-obsessed macOS maintenance CLI and TUI in Go: cleans, uninstalls, de-duplicates, audits. Read §1 before
+> changing anything. History: `Docs/Changelog.md`.
+
+| | |
+|---|---|
+| **Updated** | 2026-11-07: stats.md overhauled to the MakeStats template |
+| **Verified** | 2026-11-07, full, against code and a build-and-test run (method: §13) |
+| **Identity** | Go module `github.com/anumey1/Suns`, binary `suns`, version `0.0.0-dev` (`internal/cli/root.go` `Version`) |
+| **Stack** | Go 1.25 (toolchain 1.26.4), macOS only; Cobra, Viper, Bubble Tea, gopsutil v4, `howett.net/plist`, `x/sys` |
+| **Branch · verify** | `main` · `go build ./... && go vet ./... && go test -race ./...` |
+| **Live** | Not released: no release, binary or tap exists; the release pipeline is parked (R-1, 2026-11-07) [owner] |
+| **Active plan** | None. Phases 0–4 done in scope; `Docs/Phases.md` Phases §4.7 and Phases §4.8 are parked (§2, R-1) |
+| **Formats** | `history.jsonl` field names (no version field; restore reads them), `safe_cache.json` `version` 1 (§6) |
+| **Read first** | `CLAUDE.md`, `.claude/rules/safety.md` (loaded for `pkg/` safety packages) |
+
+## 0. Current state
+
+| What | State |
+|---|---|
+| Build and tests | Green: build, vet and `go test -race -count=1 ./...` pass, 172 test functions in 24 packages (as of 2026-11-07; recount: §13) [build] |
+| Live | Not released. Release pipeline and `lang-strip` parked by owner ruling R-1 (§10.1) |
+| Built | Phases 0–4 in scope: every command in §3 exists and is unit-tested through its engine |
+| Bugs that matter now | L-2: a scheduled clean without Full Disk Access records `ok` while cleaning nothing. L-5: `doctor` does not check two pinned tools (§11.1) |
+| Waiting on the owner | On-device checks O-1 to O-7 (§2); decide O-12 (`-y` flag) |
+| Latest Changelog entry | 2026-11-07: stats.md overhauled to the MakeStats template |
+
+## 1. Rules and hazards
+
+### 1.1 Working rules
+
+These are this project's rules beyond the global ones; `CLAUDE.md` states them in one line each.
+
+1. **Prove behaviour with unit tests, never by running `suns`.** Allowed runs: `--dry-run`, `--help`, `help`,
+   `--version`. Why: every other command touches the owner's real Mac (see §1.2). Ask the owner to run anything else
+   with `!`.
+2. **A new destructive action is an `Operation` value type** in `pkg/operation`, routed through `plan.New().Seal()`
+   → `safety.BuildGroups`/`Render` → `safety.Execute`, re-verifying its target in `ValidateAtExec` and recording a
+   typed `HistoryEntry`. Why: the gate, the time-of-use re-check and the undo record exist only on that path.
+3. **A new external tool is pinned twice**: in `pkg/syscmd` `productionAllowlist` and in `internal/doctor`
+   `pinnedTools`, with a parsing contract tested against a captured fixture through an injected runner. Why: absolute
+   paths stop `$PATH` hijacking, and tool output changes between macOS versions (see the nettop trap, §11.2).
+4. **Tests that delete use only `t.TempDir()`**, and no test runs a real destructive or privileged command. Why:
+   `go test` runs as the owner on the owner's Mac.
+5. **Package docs live in `doc.go`.** Why: a second package comment elsewhere fails `go vet`.
+6. **Changes to `pkg/safety`, `pkg/trash`, `pkg/privilege`, `pkg/operation`, `pkg/plan`, `pkg/syscmd`,
+   `pkg/history`** follow `.claude/rules/safety.md` and need the strongest tests. Why: these packages are what makes
+   any deletion safe.
+
+### 1.2 Hazards
+
+| Hazard | What breaks | Guard |
+|---|---|---|
+| Running `suns` from a session | Trashes or permanently deletes files, kills processes, installs a launchd agent, prompts for sudo, probes the LAN, on the owner's Mac | `~/.claude/hooks/suns-guard.sh` (PreToolUse, `.claude/settings.json`) blocks all but `--dry-run`/`--help`/`help`/`version` |
+| A config file with `deletion_mode: obliterate` and `confirm_mode: true` | Plain `suns clean` then deletes permanently with no gate. The "first run can't destroy data" promise holds only with no config file [inferred] | None in code; the file is `~/Library/Application Support/Suns/config.yaml` |
+| `-y`/`--yes` and `--deathstar` | Skip the confirmation gate in one keystroke (O-12) | Trash stays the default unless `--jarjar obliterate` |
+| Weakening the deny floor, or deleting by path string | Could delete system or iCloud data | §1.3 tests; `.claude/rules/safety.md` |
+| Renaming `HistoryEntry` JSON fields | Restore can no longer read existing `history.jsonl` entries | None (§6) |
+| `suns schedule install` | Creates a daily unattended agent | Scheduled runs are trash-only and allowlist-only (§1.3) |
+| Editing code | `gofmt` is checked after every edit | `~/.claude/hooks/gofmt-check.sh` (PostToolUse) |
+
+### 1.3 Invariants and guards
+
+| Invariant | Guard |
+|---|---|
+| With no flags and no config, nothing is deleted permanently: defaults are `deletion_mode: trash`, `confirm_mode` off (`internal/config/session.go`) | Guard: none (`internal/config` has no tests; O-15) |
+| A sealed plan is a pointer-free value copy; nothing can change it after the gate shows it | `pkg/plan`: `TestSeal_PanicsOnPointerReceiverOp`, `TestSeal_FreshSliceImmuneToSourceMutation`, `TestSeal_ValueCopiesPointerBackedOps` |
+| Every op is re-validated at execution; a failed re-check is skipped, never run, and never stops the batch | `TestExecute_FullFlowWithSkip` (`pkg/safety`); per op: `TestFileDeleteOp_RefusesIdentityMismatch`, `TestProcessKillOp_RefusesStaleIdentity`, `TestRepoMaintenance_DirtySkippedAtExec` |
+| The deny floor refuses `/`, the home root, iCloud Drive, `/System`, `/usr` (not `/usr/local`), `/bin`, `/sbin`, `/Library/Apple`, `/private/var/db`, `/cores`, and any read-only volume; it only ever grows | `pkg/safety/floor` `TestCheck_*`; re-checked at exec: `TestFileDeleteOp_FloorRecheckedAtExec` |
+| Permanent delete never follows a symlink out of its tree | `TestObliterate_NeverEscapesViaSymlink`, `TestObliterate_RefusesIdentityMismatch` (`pkg/safety/fsdelete`) |
+| The trash/obliterate axis affects only file deletes | `TestBuildGroups_DeletionAxisOnlyAffectsFileDelete`, `TestDNSFlush_ModeIsInert` |
+| External commands: allowlisted absolute path, no shell, `LC_ALL=C`, output capped at 8 MiB | `pkg/syscmd` `TestRun_RejectsNonAllowlisted`, `TestRun_NoShellInjection`, `TestRun_SetsDeterministicLocale`, `TestRun_BoundsOutput` |
+| Privileged ops without a sudo ticket are skipped, not failed or escalated | `TestDNSFlush_NoPrivilegeSkips`, `TestServiceUnload_NoPrivilegeSkips`, `TestReceiptForget_NoPrivilegeSkips`, `TestProcessKillOp_PrivilegedSkippedByDefault` |
+| The chokepoint runs only allowlisted actions | `TestRun_RejectsNonAllowlistedAction` (`pkg/privilege`) |
+| History is mode 0600; redacted export never changes the canonical file | `TestFileModeIs0600`, `TestExportRedacted_TransformsCopyNotCanonical` (`pkg/history`) |
+| `nuke` keeps any file claimed by more than one package | `TestPlan_SharedDependencyGuardAndOrdering` (`internal/uninstaller`) |
+| Restore offers only reversible, trashed file deletes | `TestCandidates_FiltersToReversibleTrashed`, `TestCandidates_ExcludesPhase2OpKinds` |
+| Scheduled cleans are trash-only and allowlist-only (`runScheduledClean`, `internal/cli/clean.go`) | Guard: none (`internal/cli` has no tests; O-15) |
+| `pkg/*` never imports `internal/*` | Guard: none (true on 2026-11-07: `go list -f '{{.Imports}}' ./pkg/...`) |
+| `productionAllowlist` and `doctor` `pinnedTools` list the same tools | Guard: none, and false today (L-5) |
+
+## 2. Open work
+
+IDs are new as of 2026-11-07 (the old doc had none). Closed IDs move to the Changelog entry that closed them.
+
+| ID | Item | State | Who | Next step |
+|---|---|---|---|---|
+| O-1 | Native Cgo trash (`NSFileManager trashItemAtURL:`) in `pkg/trash/native.go`; the pure-Go `~/.Trash` path is the only one today | Open | Agent, then owner on device | Implement behind the existing seam; owner checks on device |
+| O-2 | Killable volume probe for hung volumes (`pkg/trash/probe.go`) | Open | Agent + owner | Helper subprocess and an integration test |
+| O-3 | IOKit thermals in Cgo (`internal/telemetry/iokit.go`, `assets/sensors.json`) | Open | Agent + owner | Bounded IOKit reads; owner checks on device |
+| O-4 | Live `sudo -n powermetrics` stream checked end to end (`internal/tui/powerlaunch.go`) | Open | Owner | Run `get-coffee`, press `e`, confirm GPU/thermal/power tiles |
+| O-5 | Battery wattage, cycles and health via `ioreg` (`internal/telemetry/battery.go`) | Open | Agent | Pin `ioreg` (rule 3), fixture test |
+| O-6 | Real `docker system prune` on a machine with Docker (`internal/docker`) | Open | Owner | Owner runs `suns docker-prune` with Docker present |
+| O-7 | launchd `bootstrap`/`bootout` checked on device (`internal/scheduler`) | Open | Owner | Owner runs `schedule install`, `status`, `uninstall` |
+| O-8 | `suns config show/get/set` (today the YAML is edited by hand) | Open | Agent | Spec in master TD; show the two safety axes |
+| O-9 | History rotation: archive old entries to gzip files by age or size (L-3) | Open | Agent | Rotation that keeps restore working |
+| O-10 | Onboarding and Full Disk Access panel in the TUI (L-1) | Open | Agent | Detect via `doctor`'s probe, explain, open System Settings |
+| O-11 | Scheduled clean must report skipped protected targets instead of `ok` (L-2) | Open | Agent | Count discovery skips; distinct status such as `skipped_fda` |
+| O-12 | Make bypassing the gate harder: drop `-y` for a long flag | Open | Owner decides | Owner rules yes or no |
+| O-13 | TUI: Restore only lists (no select-and-restore); Audit menu is a placeholder; menu still says "(later phase)" for Get Coffee and Audit (`internal/tui/app.go`) | Open | Agent | Wire restore and audit screens; fix labels |
+| O-14 | Add `killall` and `mdutil` to `doctor` `pinnedTools`, plus a test that it matches `productionAllowlist` (L-5) | Open | Agent | Small code change |
+| O-15 | Direct tests for `internal/cli`, `internal/config`, `internal/doctor`, `internal/procadmin`, `pkg/procctl`, `pkg/safety/identity`, `pkg/safety/firmlink` | Open | Agent | Start with config defaults and scheduled mode (§1.3 "Guard: none") |
+| O-16 | Cosmetic TUI backlog: braille charts (ntcharts) with block fallback, harmonica easing, bubblezone mouse, truecolor detection | Open | Agent | Low priority |
+| O-17 | `README.md` status is stale (Phase 4 "in progress", `scheduler` called a stub) | Open | Agent | Rewrite the status part, point to this doc |
+| O-18 | `nettopLauncher` comment says the stream is CSV; it uses `-l 0`, which is fixed-width (§11.3) | Open | Agent | Fix the comment, or switch to `-L 0` (CSV) and keep both parsers |
+
+**Parked: don't propose these.**
+
+| Item | Why parked | Reopen when |
+|---|---|---|
+| Release pipeline: universal binary, signing, notarization, `.pkg`, Homebrew (`Docs/Phases.md` §4.8) | Owner ruling R-1 | Owner says so |
+| `suns lang-strip <app>` localization stripper (`Docs/Phases.md` §4.7) | Most dangerous feature: deleting `.lproj` breaks code signatures; designed to ship last, opt-in per app, with `codesign --verify` after [doc] | After the release pipeline, by owner decision |
+
+## 3. What it is
+
+Suns ("Super User Nutcase Sessions — Burn It All") is a macOS maintenance utility for developers and advanced users.
+It cleans developer caches, uninstalls apps with their leftovers, removes duplicate files, empty folders and broken
+symlinks, garbage-collects git repos, prunes Docker, flushes DNS, audits security and the network, shows a live
+system dashboard, and schedules unattended cleanups. Its promise: **a first run with no flags (and no config file)
+can never permanently destroy data**. Everything destructive is previewed, confirmed, moved to the Trash by default,
+and undoable with `restore`.
+
+**Scope:** macOS only (darwin; Apple Silicon and Intel). **Non-goals:** a GUI app; cleaning anything outside a
+curated allowlist or an explicitly named path; claiming a "complete" uninstall.
+
+**Commands** (`internal/cli`, one file per command). `suns` with no subcommand opens the TUI.
+
+| Command | Changes the Mac? | Reversibility | What it does |
+|---|---|---|---|
+| `doctor` | No | — | Environment and capability self-check, including Full Disk Access |
+| `clean` | Yes | Reversible (irreversible with obliterate) | Trash dev caches from the safe-cache allowlist (§6); `--include-optin` |
+| `clean empty-dirs <path>` | Yes | Reversible | Empty folders (`.DS_Store`-only counts as empty); always confirms the scope |
+| `clean broken-symlinks <path...>` | Yes | Reversible | Dangling symlinks; always confirms the scope |
+| `clean --scheduled` | Yes | Reversible | Unattended mode used by the launchd agent (§7.10) |
+| `scan <path...>` | No | — | Report broken symlinks and empty folders |
+| `ashen [path...]` (alias `dedup`) | Yes | Reversible (irreversible with obliterate) | Duplicate finder |
+| `nuke <app>` | Yes | Recoverable and irreversible parts | Precision uninstall: bundle, support files, agents, receipts |
+| `orphans` | Yes | Reversible | Launch agents whose program is gone |
+| `restore` | Undo | — | List and restore trashed file deletes |
+| `maintain [path...]` | Yes | Recoverable | `git gc` on clean repos; `--aggressive`, `--prune-now` opt-in |
+| `docker-prune` | Yes | Irreversible | `docker system prune -a -f`; `--volumes` opt-in |
+| `dns-flush` | Yes, root | Irreversible | Flush the DNS cache and HUP mDNSResponder |
+| `schedule install/uninstall/status` | Authoring | — | Manage the daily launchd cleanup agent |
+| `audit` (alias `secure`), `audit logs` | No (`logs` needs root) | — | Security posture; sudo/auth log timeline |
+| `net`, `net lan`, `net bw` | No (`lan --probe` sends packets) | — | Sockets and open ports; LAN devices; bandwidth |
+| `ps` | Optional kill | Irreversible | Process list; `--kill` goes through the gate |
+| `get-coffee` | No | — | Live telemetry dashboard (TUI) |
+
+**Flags on destructive commands:** `--dry-run` prints the sealed plan and changes nothing; `-y`/`--yes` skips the
+confirmation; `--deathstar` sets `confirm_mode` on (execute with no gate; it does **not** make deletion permanent);
+`--jarjar trash|obliterate` sets the deletion mode. Read-only commands take `--json`. Without a flag, the gate shows
+the plan grouped by reversibility and asks `[y/N]`, defaulting to No. Root is asked for once, at execution, after
+the gate.
+
+**The owner's first run on a real machine** (owner only; sessions may not run these, §1.2): `suns doctor`; then the
+read-only `audit`, `net`, `get-coffee`; then `--dry-run` on `clean`, `ashen`, `maintain`, `docker-prune`; then
+`ashen` on a sandbox folder of fake duplicates; then a real `suns clean`, which still asks first.
+
+## 4. How it works
+
+**Governing principle:** safe by default, dangerous on demand. Every potentially destructive action is a typed
+`Operation` value, frozen into an immutable plan, shown through a gate graded by reversibility (reversible,
+recoverable, irreversible), re-checked against the real target at the moment of use, executed, and recorded in an
+append-only history. A path-based deny floor underneath can never be bypassed by any flag, mode, config or schedule.
+Design source: `Docs/SunsMasterTD.md` (master TD): TD §4 operation model, TD §5.3 deny floor, TD §6 privilege.
+
+**Layers.** `cmd/suns` → `internal/cli` (Cobra) or `internal/tui` (Bubble Tea) → engines in `internal/*` that only
+**discover** and return ops → the safety spine in `pkg/*` that executes them. `pkg/*` never imports `internal/*`.
+
+**The pipeline** (all in `pkg/`):
+
+1. **Operation** (`pkg/operation/operation.go`): methods `Kind`, `Describe`, `Reversibility`, `ValidateAtPlan`,
+   `ValidateAtExec`, `Execute`, `HistoryRecord`. Ops are pure value types so they can be sealed.
+2. **Plan** (`pkg/plan`): `plan.New(ops).Seal()` deep-copies the ops into a pointer-free form with a sortable ID, and
+   panics on a pointer-receiver op. What the gate shows is exactly what runs.
+3. **Gate** (`pkg/safety/gate.go`): `BuildGroups(plan, mode)` groups by kind with the effective reversibility (a file
+   delete is irreversible in obliterate mode); `Render` and `Summarize` print it.
+4. **Revalidate and execute** (`pkg/safety/revalidate.go`): `Execute` runs `ValidateAtExec` on every op; a failed
+   check is recorded `skipped:revalidation`. One bad target never stops the batch (master TD §6.1).
+5. **Deny floor** (`pkg/safety/floor`): `Check(path)` at plan and exec time; list in §1.3.
+6. **Identity** (`pkg/safety/identity`): small files by SHA-256; directories, symlinks and large files by size,
+   mtime, device and inode. `firmlink.IsBoundary` tells a firmlink crossing from a swap.
+7. **Permanent delete** (`pkg/safety/fsdelete`): `Obliterate` uses `openat`/`unlinkat` with no-follow, re-checking
+   identity at the descriptor. Trash mode never reaches it.
+8. **Trash** (`pkg/trash`): pure-Go move into `~/.Trash`; a target that cannot be trashed safely is skipped, never
+   deleted. A per-volume circuit breaker (`breaker.go`) stops a failing volume stalling the batch. Native Cgo path
+   and volume probe are seams (O-1, O-2).
+9. **History** (`pkg/history`): every result appended as one JSON line (§6).
+
+**Op kinds** (`pkg/operation/kind.go`):
+
+| Kind | Type | Reversibility | Reaches the world through |
+|---|---|---|---|
+| `file_delete` | `FileDeleteOp` | Reversible (irreversible in obliterate) | `Trasher` or `fsdelete` |
+| `process_kill` | `ProcessKillOp` | Irreversible | `ProcessKiller` (`internal/procadmin`) |
+| `service_unload` | `ServiceUnloadOp` | Recoverable | `SystemRunner` → `launchctl` |
+| `receipt_forget` | `ReceiptForgetOp` | Irreversible | `SystemRunner` → `pkgutil` |
+| `dns_flush` | `DNSFlushOp` | Irreversible | `SystemRunner` → `dscacheutil`, `killall` |
+| `repo_maintenance` | `RepoMaintenanceOp` | Recoverable | `SystemRunner` → `git` |
+| `container_prune` | `ContainerPruneOp` | Irreversible | `ContainerPruner` → `docker` |
+| `cache_reset` | none (reserved) | — | — |
+| `scheduled_run` | none (history record only) | — | — |
+
+**Injection seams** keep ops pure: `UseTrasher`, `UseProcessKiller`, `UseSystemRunner`, `UseContainerPruner`. The
+defaults refuse (`ErrPrivilegeRequired`, `ErrContainerEngineUnavailable`), so an unwired op cannot mutate anything.
+The CLI root wires `procadmin.New()` and `newElevatingRunner()` (`internal/cli/system_runner.go`) at startup.
+
+**External commands** go through `pkg/syscmd`: absolute pinned paths, scrubbed environment with `LC_ALL=C`, no
+shell, compile-time `productionAllowlist` (18 tools), 8 MiB output cap, context deadline. `NewWithAllowlist` serves
+tests and the discovered `docker` binary, so a variable path never enters the production list. Exceptions: the two
+long-running streams (`nettop`, `powermetrics` in `internal/tui/powerlaunch.go`) and the sudo calls below use
+`os/exec` directly with pinned paths and `LC_ALL=C` (§10.2).
+
+**Privilege.** `pkg/privilege` `Chokepoint` holds a per-workflow sudo ticket: `Acquire` prompts once, `Run` executes
+only allowlisted actions; cancel or expiry map to `ErrPrivilegeRequired`, which ops treat as skip. The CLI's
+`elevatingRunner` sends unprivileged reads straight to `syscmd` and privileged mutations through the chokepoint. Other
+places use the same cached sudo ticket (§10.2): the TUI `e` key (`sudo -v` via `tea.ExecProcess`), the root process
+killer (`sudo -n suns __killproc …`, which validates and kills as root in one process), and the `powermetrics`
+stream (`sudo -n`).
+
+**TUI** (`internal/tui`): Elm architecture (`model`, `Update`, `View`). The telemetry poller publishes one immutable
+`SystemSnapshot` through an `atomic.Pointer` that every widget reads; `components/` draws sparklines and gauges,
+`theme/` holds the palette and `NO_COLOR` handling.
+
+## 5. Where things live
+
+Paths are relative to the repo root. Recount packages: `go list ./... | wc -l` (36 as of 2026-11-07).
+
+| Path | What |
+|---|---|
+| `cmd/suns` | Entry point: signals → `cli.Execute` |
+| `assets/` | `go:embed` data: `safe_cache.json`, `oui.csv`, `sensors.json` (§6) |
+| `pkg/operation` | `Operation` interface, op kinds, concrete ops, `HistoryEntry`, injection seams |
+| `pkg/plan` | Sealed plans |
+| `pkg/safety` | Gate, revalidate/execute; `floor/`, `identity/`, `firmlink/`, `fsdelete/` |
+| `pkg/trash` | Trasher, circuit breaker, native and probe seams |
+| `pkg/syscmd` | Hardened executor and `productionAllowlist` |
+| `pkg/privilege` | Sudo chokepoint |
+| `pkg/history` | `history.jsonl` writer, reader, redacted export |
+| `pkg/plist` | Binary and XML plist reading; `powermetrics` stream tokenizer |
+| `pkg/procctl` | Process identity and signalling |
+| `internal/cli` | One Cobra file per command; `system_runner.go` (elevating runner); `killproc.go` (hidden `__killproc`) |
+| `internal/config` | `SessionState` and `Load` (Viper, config file + flag overrides) |
+| `internal/scanner`, `dedup`, `uninstaller`, `orphans`, `restore`, `purge`, `maintain`, `docker`, `scheduler` | Engines behind the destructive commands (§7) |
+| `internal/audit`, `internal/net`, `internal/telemetry` | Read-only engines: audit, network, dashboard data |
+| `internal/procadmin`, `internal/doctor` | Privileged process killer; self-check |
+| `internal/optimizer` | Doc-only stub (§10.2) |
+| `internal/tui` | TUI app, dashboard, `powerlaunch.go` stream launchers; `components/`, `theme/`, `views/` |
+
+**Where do I look for…**
+
+| I want to… | Open | Run |
+|---|---|---|
+| Add a destructive command | A new op in `pkg/operation` (copy `dnsflush.go`), an engine in `internal/<name>`, a command in `internal/cli` | `go test -race ./pkg/operation/ ./internal/<name>/` |
+| Add or change a safe-cache target | `assets/safe_cache.json` | `go test -race ./internal/scanner/` |
+| Protect another path | `pkg/safety/floor/floor.go` (add only) | `go test -race ./pkg/safety/...` |
+| Use a new external tool | `pkg/syscmd/syscmd.go`, `internal/doctor/doctor.go`, a fixture test in the engine | `go test -race ./pkg/syscmd/ ./internal/<engine>/` |
+| Fix a parser for tool output | The engine's parse function and its test fixture (e.g. `internal/net/bandwidth.go` and `bandwidth_test.go`) | That package's tests |
+| Change a dashboard tile | `internal/tui/dashboard.go`; data in `internal/telemetry` | `go test -race ./internal/tui/... ./internal/telemetry/` |
+| Change restore | `internal/restore`, `pkg/history` | `go test -race ./internal/restore/ ./pkg/history/` |
+| Change the gate's look | `pkg/safety/gate.go`, `internal/tui/theme` | `go test -race ./pkg/safety/ ./internal/tui/...` |
+
+## 6. Data, formats and limits
+
+| Data | Where | Format and rule |
+|---|---|---|
+| Operation history | `~/Library/Application Support/Suns/history.jsonl` | Append-only JSON Lines, mode 0600, one `operation.HistoryEntry` per line, real paths (restore needs them). **No version field: add fields with `omitempty`, never rename or remove one**, or restore cannot read old entries. No rotation (L-3) |
+| Config | `~/Library/Application Support/Suns/config.yaml` | Keys `confirm_mode` (bool, default off) and `deletion_mode` (`trash` default, or `obliterate`). Precedence: flags > file > defaults (`internal/config`) |
+| Safe-cache allowlist | `assets/safe_cache.json` | `version` 1; 12 targets: npm, yarn, pnpm, go-mod, pip, derived-data, cocoapods, carthage, swiftpm, gradle, homebrew, and opt-in ios-device-support. Each has a `rebuild_cost`. The only paths `clean` ever touches |
+| MAC vendors | `assets/oui.csv` | 56 curated rows (`AA:BB:CC,vendor`); unknown prefixes show "unknown vendor" |
+| Sensor map | `assets/sensors.json` | `version` 1; board ID → sensor keys, for the IOKit seam (O-3) |
+| Scheduled agent | `~/Library/LaunchAgents/com.suns.scheduled-clean.plist`, logs in `~/Library/Logs/Suns/` | Generated by `internal/scheduler` `GeneratePlist`: daily, `RunAtLoad` false, runs `clean --scheduled` |
+
+Recount: `jq '.targets|length' assets/safe_cache.json`; `grep -cE '^[0-9A-Fa-f]{2}:' assets/oui.csv`.
+
+**Fixed numbers:** syscmd output cap 8 MiB (`DefaultMaxOutput`); `audit logs` flags a burst at 3 or more failures in
+60 s per user; dedup reads a 4 KB head before hashing. Bump `safe_cache.json` `version` when the target schema
+changes (the field is parsed in `internal/scanner` but not checked yet).
+
+## 7. Features
+
+Every engine discovers and returns typed results plus ops; the CLI renders the gate and calls `safety.Execute`.
+Engines that scrape a tool take an injected runner, so tests use captured fixtures.
+
+### 7.1 clean (`internal/scanner`)
+
+`LoadSafeCacheManifest` parses the allowlist; `Discover` stats each target, sizes it, computes its identity and
+emits a `FileDeleteOp`. Opt-in targets need `--include-optin`; floor-protected targets are skipped. A target whose
+size reads as 0 (empty, or unreadable without Full Disk Access) is not offered.
+
+### 7.2 ashen (`internal/dedup`)
+
+`Find` in three passes: size, 4 KB head, SHA-256. Hardlinks are never offered, `.app` bundles are units, symlinks
+are never followed, APFS clones are not excluded, cosmetic xattr differences are ignored, and a keeper heuristic
+picks the copy to keep. Emits `FileDeleteOp`s for the other copies.
+
+### 7.3 nuke (`internal/uninstaller`)
+
+`Plan` resolves the app and its bundle ID, traces `~/Library` support files and launch agents, and for `.pkg` apps
+harvests `pkgutil --files`, keeping any file `pkgutil --file-info` shows another package owns. Emits in order:
+`ServiceUnload` → `FileDelete` → `ReceiptForget`. Reports its scope; never claims a complete uninstall.
+
+### 7.4 orphans (`internal/orphans`)
+
+Resolves each LaunchAgent's `Program`/`ProgramArguments` (unwraps `env`, declines shell wrappers and relative
+paths, skips Apple-managed) and flags only absolute executables that are gone. Boots them out, then trashes the plist.
+
+### 7.5 restore (`internal/restore`)
+
+`Candidates` keeps only reversible, trashed file deletes from history. `Restore` moves the item back, recreating
+missing parents, restoring alongside on a name clash, and refusing a tampered trash entry.
+
+### 7.6 empty-dirs, broken-symlinks, scan (`internal/purge`)
+
+`EmptyDirs` works bottom-up and emits one op per largest empty subtree; never removes the named root.
+`BrokenSymlinks` walks without following and flags links whose target is missing. `scan` reports both, read-only.
+
+### 7.7 maintain (`internal/maintain`)
+
+Finds `.git` repos, estimates savings (`git count-objects -v`), checks cleanliness (`git status --porcelain` and
+merge/rebase/cherry-pick/revert/bisect markers) and emits `RepoMaintenanceOp` only for clean repos.
+`ValidateAtExec` re-checks cleanliness just before `git gc`.
+
+### 7.8 docker-prune (`internal/docker`)
+
+`Detect` probes Docker Desktop, Colima, OrbStack and Rancher sockets and CLI paths, confirms the daemon and reads
+`docker system df`; absent or stopped is a clean no-op. `NewPruner` runs the prune through
+`syscmd.NewWithAllowlist`. The real prune is unchecked on a device (O-6).
+
+### 7.9 dns-flush (`pkg/operation/dnsflush.go`)
+
+One `DNSFlushOp`, root: `dscacheutil -flushcache` then `killall -HUP mDNSResponder` through the chokepoint; skips
+cleanly without privilege; a failure of the second command is a failure.
+
+### 7.10 schedule (`internal/scheduler`, `internal/cli/clean.go`)
+
+`GeneratePlist` writes the agent (§6); `Install`/`Uninstall`/`CheckStatus` use `launchctl bootstrap`/`bootout`/
+`print` in `gui/<uid>` (unchecked on device, O-7). `clean --scheduled` (`runScheduledClean`) forces trash, uses
+only non-opt-in allowlist targets, ignores flags and config, and writes a `scheduled_run` record with status `ok`,
+`partial` or `failed` (see L-2).
+
+### 7.11 audit (`internal/audit`)
+
+`Posture`: SIP (`csrutil`), Gatekeeper (`spctl`), FileVault (`fdesetup`), XProtect version, each ok/warn/risk/unknown
+with a worst-of overall. `AuthLog`: `log show` for `sudo`, classified success/failure/denied, with burst detection.
+Parsers degrade to unknown.
+
+### 7.12 net (`internal/net`)
+
+`Sockets` parses `lsof -i -n -P -F` into process → address:port and flags externally reachable listeners. `LANScan`
+parses `arp -a -n`, adds vendor and reverse DNS, with an optional warned TCP probe. `Bandwidth`: per-interface rates
+from gopsutil (reliable) plus **experimental** per-process rates from two `nettop -P -x -L 2` (CSV) samples.
+
+### 7.13 get-coffee dashboard (`internal/telemetry`, `internal/tui/dashboard.go`)
+
+The poller samples CPU per core, memory and swap, all mounted physical volumes, disk I/O, uptime/load, top processes
+and battery (pmset). Tiles: CPU, MEMORY, GPU, THERMAL, DISK I/O, DISK (fullest volume), BATTERY, POWER, each with a
+health badge (live, stale, N/A) so dead data never looks live. GPU, thermal and power come from the `powermetrics`
+stream after `e` elevates. The **experimental** NET widget diffs a supervised `nettop -P -x -l 0` stream
+(`NetSource`, fixed-width output, §11.3). Keys: arrows select, `k` kill (through the gate), `e` elevate, `p` pause,
+`esc` back.
+
+### 7.14 ps and process kill (`internal/cli/ps.go`, `internal/procadmin`, `pkg/procctl`)
+
+`ProcessKillOp` captures PID, birth time and executable; own-user processes are validated and signalled directly,
+others through `sudo -n suns __killproc`, which re-validates as root. Zombies are reported, never killed.
+
+### 7.15 doctor (`internal/doctor`)
+
+Checks platform, Go runtime, home/trash/history folders, pinned tools present (missing two, L-5), and Full Disk Access
+by probing one protected path.
+
+### 7.16 TUI menu (`internal/tui/app.go`)
+
+Menu: Clean, Restore, Get Coffee, Audit, Doctor, Quit, with chips showing the deletion and confirm modes. Restore
+only lists; Audit shows a placeholder (O-13).
+
+## 8. Build, release and deploy
+
+**Toolchain:** Go 1.25 language, toolchain `go1.26.4` (`go.mod`); macOS. Direct dependencies: cobra, viper,
+bubbletea, bubbles, lipgloss, gopsutil v4, `howett.net/plist`, `golang.org/x/sys`. Listed in `go.mod` comments but
+not required yet: harmonica, ntcharts, bubblezone (O-16).
+
+**Verify (must be green):** `go build ./... && go vet ./... && go test -race ./...`. Add `-count=1` to bypass the
+test cache. `gofmt` is checked by a hook after edits.
+
+**Run without installing:** `go run ./cmd/suns --help` (only help, `--dry-run` or `--version` from a session).
+
+**Release:** not released; the pipeline is parked (R-1). The version is `0.0.0-dev`, set at release through
+`-ldflags` on `Version` in `internal/cli/root.go`. No signing material exists in the repo. Distribution options
+without a Developer ID, noted 2026-06-26 for when it is reopened [doc]: source build, an unsigned GitHub release
+binary (users clear quarantine with `xattr`), or a Homebrew tap that builds from source. A `.pkg` is impractical
+unsigned.
+
+## 9. Testing
+
+| Suite | Guards | Run |
+|---|---|---|
+| `pkg/*` unit tests | The safety spine: sealing, floor, identity checks, fd-anchored delete, trash fallback and breaker, allowlist, chokepoint, history (§1.3) | `go test -race ./pkg/...` |
+| Engine tests (`internal/*`) | Discovery logic and tool parsers against captured fixtures (lsof, nettop, `log show` JSON, git porcelain, `docker system df`, pkgutil) via injected runners | `go test -race ./internal/...` |
+| TUI tests (`internal/tui`) | Menu, toggles, modal, dashboard render, kill flow | `go test -race ./internal/tui/...` |
+
+All tests run under `-race`, deletion tests use only `t.TempDir()`, and none runs a real destructive or privileged
+command. A new test must fail without the fix it covers.
+
+**Not covered, and why:** `internal/cli`, `internal/config`, `internal/doctor`, `internal/procadmin`,
+`internal/optimizer`, `internal/tui/theme`, `internal/tui/views`, `pkg/procctl`, `pkg/safety/identity` and
+`pkg/safety/firmlink` have no test files; identity and firmlink are exercised through the op and floor tests, the CLI
+through its engines (O-15). Live paths that need a device, root or Docker (O-1 to O-7) cannot run headless.
+
+## 10. Decisions
+
+### 10.1 Owner rulings
+
+| ID | Ruling | Date or source | Why |
+|---|---|---|---|
+| R-1 | The signed and notarized release pipeline stays the plan, deferred for now; `lang-strip` waits with it | 2026-11-07 [owner]; earlier recorded in the old stats.md §9 [doc] | Needs Apple Developer credentials and on-device signing |
+| R-2 | `lang-strip` is quarantined and ships last, opt-in per app, verified with `codesign --verify` | `Docs/Phases.md` §4.7, master TD §12.4 | Deleting `.lproj` invalidates code signatures |
+| R-3 | Scheduled runs are trash-only, allowlist-only, ignore flags and config, and record `ok`/`partial`/`failed` | Master TD §12.20 | Unattended deletion is the most dangerous mode |
+| R-4 | Per-process network attribution ships labelled experimental and degrades to "unavailable" | Master TD §7 | `nettop` output is fragile; never show wrong numbers confidently |
+
+### 10.2 Deviations from the spec
+
+| Spec (`Docs/SunsMasterTD.md`) | Code |
+|---|---|
+| TD §6: all elevation through one chokepoint | Four places share the sudo ticket: `pkg/privilege`, TUI `elevateCmd` (`sudo -v`), `internal/procadmin` (`sudo -n suns __killproc`), `powermetricsLauncher` (`sudo -n`) [inferred] |
+| TD §6.3: every external tool through `pkg/syscmd` | The `nettop` and `powermetrics` streams and the sudo calls use `os/exec` directly (streams need a live pipe, not a capped buffer), with pinned paths and `LC_ALL=C` |
+| TD §8: `optimizer` holds DNS flush and `mdutil` actions | `internal/optimizer` is a doc stub; DNS flush is `DNSFlushOp`; `mdutil` is allowlisted but unused |
+| TD §4.2: `CacheReset` op kind | Constant reserved, no concrete op |
+| TD §12.1: `dedup` command | Named `ashen`; `dedup` is a hidden alias |
+| TD §4.4: bounded Cgo trash | Pure-Go fallback only (O-1) |
+
+### 10.3 Accepted, don't chase
+
+| Item | Reopen if |
+|---|---|
+| `oui.csv` is a 56-row curated subset, so many vendors show "unknown vendor" | Owner wants full vendor names |
+| Per-process bandwidth (`net bw`, NET widget) may show "unavailable" | A macOS update breaks both nettop formats |
+
+## 11. Limitations, traps and diagnoses
+
+### 11.1 Known limitations
+
+| ID | Limitation | Tracked |
+|---|---|---|
+| L-1 | Without Full Disk Access, protected caches in `~/Library` are skipped; `doctor` warns, but nothing explains it on first run | O-10 |
+| L-2 | A scheduled clean without Full Disk Access records `ok`, "nothing to clean": unreadable targets size as 0 and are not offered, and discovery skips are not counted in the status [inferred] | O-11 |
+| L-3 | `history.jsonl` grows without limit | O-9 |
+| L-4 | TUI Restore cannot restore and TUI Audit is a placeholder | O-13 |
+| L-5 | `doctor` checks 16 of the 18 allowlisted tools (`killall`, `mdutil` missing), so it can report all present when they are not | O-14 |
+| L-6 | GPU, thermal and power tiles stay N/A until `e`; IOKit thermals are not built | O-3, O-4 |
+
+### 11.2 Traps
+
+| Trap | Fix |
+|---|---|
+| `nettop -l` prints fixed-width columns; `-L` prints CSV (`man nettop`). The two code paths use different flags | Parse by header: `parseNettopHeader` (`internal/telemetry/netsource.go`) accepts both; `net bw` uses `-L` |
+| A second package comment outside `doc.go` | `go vet` fails; keep package docs in `doc.go` |
+| `suns version` is not a subcommand | Use `suns --version` (Cobra `Version`) |
+| Trying to check a fix by running `suns` | The hook blocks it; write a fixture test, or ask the owner to run it with `!` |
+
+### 11.3 Diagnoses
+
+**Live NET widget empty or stuck warming** (fixed 2026-06-26, commit "Fixed Nettop Parsing Issues").
+Symptom: the experimental NET widget in `get-coffee` never shows talkers [inferred]. Cause: the stream runs
+`nettop -P -x -l 0`, which prints fixed-width frames whose header starts `time ` (spaces), while the parser only
+accepted a CSV header starting `time,`. Recognise it: captured stream output with space-aligned columns, and
+`NetSource` never setting its columns. Fix: `parseNettopHeader` detects CSV or fixed-width and `parseNetRowFixed`
+reads columns at the header's byte offsets; tests `TestParseNettopHeaderFixed`, `TestParseNetRowFixed`.
+
+## 12. Documents
+
+| Doc | Status | Read it before touching | Trust it for |
+|---|---|---|---|
+| `Docs/SunsMasterTD.md` | Current spec (v6) | Any new feature or safety change | Intent and rationale; the code deviates in §10.2 |
+| `Docs/Phases.md` | Historical plan, current for parked items | `lang-strip`, the release pipeline, on-device seams | Implementation notes per phase; its §N cite the master TD |
+| `Docs/Changelog.md` | Current | — | All history, including the old phase table |
+| `README.md` | Partly stale (O-17) | — | Overview and layout; not status |
+| `.claude/rules/safety.md` | Current, loaded for `pkg/` safety packages | The safety spine | The rules of §1.1 rule 6 |
+| `Docs/Legacy/stats-2026-11-07.md` | Historical | — | The pre-overhaul stats.md, word for word |
+
+## 13. How this doc is verified
+
+**Evidence tags:** untagged claims were read from the code on the *Verified* date. `[build]` seen in a build or test
+run · `[device]` seen on a Mac running `suns` · `[console]` seen in an outside console · `[doc]` reported by another
+doc, not re-checked · `[inferred]` worked out from the code, not run · `[owner]` reported by the owner.
+
+**How facts were checked (2026-11-07):** commands, flags and aliases from `internal/cli`; op kinds and
+reversibility from `pkg/operation`; floor list from `pkg/safety/floor/floor.go`; tools from `productionAllowlist`
+and `pinnedTools`; invariant guards by test name; asset counts with the commands below.
+
+**Re-verify:**
 
 ```bash
-# 1. Build and run the environment self-check
-suns doctor
-
-# 2. Explore every read-only feature (zero risk, always safe)
-suns audit                         # SIP / Gatekeeper / FileVault posture
-suns net                           # who is listening on which ports
-suns get-coffee                    # live dashboard (q to quit)
-
-# 3. Preview destructive commands with --dry-run
-suns clean --dry-run               # what WOULD it clean?
-suns scan ~/Downloads              # what cruft is there?
-
-# 4. Create a sandbox and test against fake data
-mkdir ~/suns-sandbox
-# (populate with duplicates, empty dirs, broken symlinks — see README)
-suns ashen ~/suns-sandbox --dry-run
-suns ashen ~/suns-sandbox           # shows the gate; press Enter (= No) to abort
-
-# 5. When ready, try a real clean (gate shown by default)
-suns clean                         # previews the plan, asks [y/N]
+go build ./... && go vet ./... && go test -race -count=1 ./...
+grep -rhE '^func (Test|Fuzz)' --include='*_test.go' . | wc -l        # test functions (172)
+go test ./... 2>&1 | grep -c '^ok'                                    # packages with tests (24)
+go list ./... | wc -l                                                 # packages (36)
+jq '.targets|length' assets/safe_cache.json                           # safe-cache targets (12)
+grep -cE '^[0-9A-Fa-f]{2}:' assets/oui.csv                            # OUI rows (56)
+go list -f '{{.ImportPath}}: {{.Imports}}' ./pkg/... | grep -c 'Suns/internal'   # must be 0
 ```
 
-The key habit: **always use `--dry-run` first** on any new command or path.
-Suns's safety defaults are strong, but the operator is the last backstop — and
-`--dry-run` gives you a risk-free preview of exactly what would happen.
-```
+**Cannot be checked from a session:** anything that needs `suns` to run (§1.2), root, Docker, or the owner's Mac
+state (O-1 to O-7). Those facts are tagged or listed as open.
+
+- Not repo paths: `~/Library/Application Support/Suns/history.jsonl`, `~/.Trash`, `~/Library/Logs/Suns/`
+- Not repo paths: `~/Library/Application Support/Suns/config.yaml`
+- Not repo paths: `~/Library/LaunchAgents/com.suns.scheduled-clean.plist`
+- Not repo paths: `~/.claude/hooks/suns-guard.sh`, `~/.claude/hooks/gofmt-check.sh`
+
+## 14. Glossary
+
+| Term | Meaning |
+|---|---|
+| Burn | Suns' word for clean or delete; scheduled cleans are "scheduled burns" |
+| ashen | The duplicate finder ("burnt carbon copies") |
+| nuke | The precision uninstaller |
+| get-coffee | The live telemetry dashboard |
+| Jarjar | The deletion-mode axis: `trash` (default) or `obliterate` (permanent); `--jarjar` |
+| Deathstar | `confirm_mode` on: execute without the gate; `--deathstar`. Does not change trash vs obliterate |
+| Gate | The grouped, reversibility-graded preview and `[y/N]` confirmation |
+| Deny floor | The path rules in `pkg/safety/floor` no flag can bypass |
+| Seal | `plan.Seal()`: freeze a plan into a pointer-free value copy |
+| Seam | An interface or file left for a later or on-device implementation (`native.go`, `iokit.go`) |
+| Chokepoint | `pkg/privilege`, the sudo ticket holder |
+| Reversible / Recoverable / Irreversible | Undo with `restore` / rebuilds or recoverable by other means / gone |
+| Master TD | `Docs/SunsMasterTD.md`; its §N differ from this doc's §N |
