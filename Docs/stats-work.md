@@ -14,7 +14,7 @@ model.
 | Pre-D1 | Done | `git status --short Docs/ CLAUDE.md .claude/` clean; branch `main` (= WorkMap §3) |
 | D1 Back up and inventory | Done | Backup `Docs/Legacy/stats-2026-11-07.md` (byte-identical, `cmp`) |
 | D2 Map every old section | Done | Map, empty sections and number map below |
-| D3 Move history to the changelog | Open | |
+| D3 Move history to the changelog | Done | 1 block, 23 lines; diff check below |
 | D4 Rewrite into the template | Open | |
 | D5 Fix every reference | Open | |
 | D6 Checks | Open | |
@@ -169,3 +169,14 @@ in D3) · *Copy of code* (dropped, AP3) · *Elsewhere* (pointer to another doc) 
 
 Old in-doc references that point at other docs, to name in D4: §6.1, §5.3, §13.1 → `SunsMasterTD` §6.1, §5.3,
 §13.1; §4.7, §4.8 (deferred work) → `Docs/Phases.md` §4.7, §4.8.
+
+## D3. History moved
+
+`Docs/Changelog.md` created (B7 title and intro; no dated entries yet, the D4 overhaul entry will be the first).
+
+| Block | Backup lines | Changelog lines | Check |
+|---|---|---|---|
+| Old `## 9. Phase-by-phase status` (phase table, Phase 4 increment table, deferral note) | 522–546 (content 524–546, 23 lines) | 13–35 | `diff <(sed -n '524,546p' Docs/Legacy/stats-2026-11-07.md) <(sed -n '13,35p' Docs/Changelog.md)` prints nothing (2026-11-07) |
+
+Moved word for word, emoji and old section numbers included (it is a record of its time). Only *History* block in
+the map; nothing else in the old doc narrates change.
