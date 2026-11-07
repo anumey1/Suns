@@ -5,9 +5,13 @@
 apps, de-duplicates files, audits security and the network, live telemetry dashboard (`get-coffee`), scheduled
 cleanups. Core promise: a first run with no flags can never permanently destroy data.
 
+## Status doc
+- `Docs/stats.md` is the status doc. Load it with `/stats` (header + section index), then read only the
+  sections the task needs. Read `stats.md §1 Rules and hazards` before changing anything.
+- Every change updates the sections it touched and the *Updated* row, and adds an entry at the top of
+  `Docs/Changelog.md`, in the same change.
+
 ## Where things are
-- `Docs/stats.md` — complete technical breakdown. Run `/stats` (or `/stats <topic>`). §3 the safety architecture,
-  §4 engines, §5 every CLI command, §8 testing, §9 phase status, §10 backlog, §12 contributor conventions.
 - `Docs/SunsMasterTD.md` — the v6 master design (single source of truth). `Docs/Phases.md` — the completion log.
 - `cmd/suns` entry · `internal/*` engines, CLI, TUI · `pkg/*` the reusable spine (operation, plan, safety, trash,
   history, privilege, syscmd, plist) · `assets/` (go:embed).

@@ -16,7 +16,7 @@ model.
 | D2 Map every old section | Done | Map, empty sections and number map below |
 | D3 Move history to the changelog | Done | 1 block, 23 lines; diff check below |
 | D4 Rewrite into the template | Done | 529 lines; check.sh PASS, 0 warnings; corrections below |
-| D5 Fix every reference | Open | |
+| D5 Fix every reference | Done | 2 updated in Suns, 2 rows in Res; rest left with reasons |
 | D6 Checks | Open | |
 
 ## D1. Old doc inventory
@@ -219,3 +219,28 @@ Owner input: release pipeline deferred for now (2026-11-07) → R-1 in §10.1, p
 Banner and commit-state lines (AP1, AP5); LOC counts and per-package test table (AP10); repo tree (AP3, replaced by
 the §5 map); `Operation` interface body (AP3); §14.3 prose (AP14; its claims are §1.3 rows with tests); per-engine
 test counts.
+
+## D5. References
+
+Searched (2026-11-07): MakeStats D5 commands in the project (excluding `.git`, `Legacy`), all `§N` outside `Docs/`,
+`.go` files for `stats`, and Lair `src`/`docs` + Res `Docs` for files naming Suns that cite a `stats.md` section.
+
+| Where | Reference | Decision |
+|---|---|---|
+| `CLAUDE.md:9-10` | Old §3, §4, §5, §8, §9, §10, §12 | **Updated**: replaced with the C5 "Status doc" block |
+| `.claude/rules/safety.md:22` | `Docs/stats.md` §3 | **Updated**: §4 How it works and §1.3 Invariants and guards |
+| `.claude/rules/safety.md:18` | master TD §5.3, §13.7 | Left: points at the master TD |
+| `README.md` (§2, §4.x, §6, §8, §13.1, §14; `Docs/Phases.md` §0, §1) | Master TD / Phases.md | Left: not stats.md (README staleness is O-17) |
+| `go.mod:9` (§2) | Master TD §2 Technology stack | Left: not stats.md |
+| `assets/*` `_comment` (§5.x, §8, §12.x, §13.5) | Master TD | Left: not stats.md |
+| `.go` comments (`§N`) | Master TD (`Docs/Phases.md` states its §N cite the master TD) | Left: none cite stats.md |
+| `Docs/Changelog.md`, `Docs/Legacy/` | Old numbers | Left: records of their time |
+| Res `Docs/WorkMap.md:75` (§3 row) | Status doc column | **Updated**: `Docs/stats.md` + `Changelog.md` (C5.2) |
+| Res `Docs/stats.md:251` | Status doc column | **Updated**: `Docs/stats.md` (+ `Changelog.md`) |
+| Res `Docs/stats.md:95` (rollout table) | Suns row "8 failing" | Updated in D6 with the final result |
+| Res `Docs/WorkMap.md:197` | Res's own stats.md §3 | Left: not Suns |
+| Res `Docs/StatsAudit.md:144` | Suns rule cites `stats.md` §3 | Left: audit record of its time |
+| Lair | No file names Suns with a stats reference | Nothing to do |
+
+Verify command agrees in the header, `CLAUDE.md` and WorkMap §3. No code changed, so no verify run was needed for D5.
+Note: the owner committed D1–D3 (`e21dede`, `3415807`, `ae1d7b4`) and staged D4; D5 edits are unstaged.

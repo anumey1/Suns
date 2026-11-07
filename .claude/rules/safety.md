@@ -19,4 +19,5 @@ These packages are what make Suns safe. Changes here need the most care and the 
 - Trash is bounded and degrades to the pure-Go fallback; restore is honest and fails loudly.
 - All privilege escalation goes through the single `pkg/privilege` chokepoint; all external tools through the
   hardened `pkg/syscmd` executor and its allowlist.
-- Detail: `Docs/stats.md` §3 and `Docs/SunsMasterTD.md` §4 — use `/stats safety` for line numbers.
+- Detail: `Docs/stats.md` §4 How it works (the pipeline) and §1.3 Invariants and guards (the test enforcing each),
+  and `Docs/SunsMasterTD.md` §4 — use `/stats safety` for line numbers.
