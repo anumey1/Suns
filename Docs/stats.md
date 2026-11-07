@@ -82,7 +82,7 @@ These are this project's rules beyond the global ones; `CLAUDE.md` states them i
 
 ## 2. Open work
 
-IDs are new as of 2026-11-07 (the old doc had none). Closed IDs move to the Changelog entry that closed them.
+IDs are stable and never reused. Closed IDs move to the Changelog entry that closed them.
 
 | ID | Item | State | Who | Next step |
 |---|---|---|---|---|

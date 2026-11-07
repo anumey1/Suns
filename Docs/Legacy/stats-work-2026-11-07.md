@@ -17,7 +17,7 @@ model.
 | D3 Move history to the changelog | Done | 1 block, 23 lines; diff check below |
 | D4 Rewrite into the template | Done | 529 lines; check.sh PASS, 0 warnings; corrections below |
 | D5 Fix every reference | Done | 2 updated in Suns, 2 rows in Res; rest left with reasons |
-| D6 Checks | Open | |
+| D6 Checks | Done | check.sh PASS 0 warnings; cold start passed; F1 yes or reasoned |
 
 ## D1. Old doc inventory
 
@@ -244,3 +244,38 @@ Searched (2026-11-07): MakeStats D5 commands in the project (excluding `.git`, `
 
 Verify command agrees in the header, `CLAUDE.md` and WorkMap §3. No code changed, so no verify run was needed for D5.
 Note: the owner committed D1–D3 (`e21dede`, `3415807`, `ae1d7b4`) and staged D4; D5 edits are unstaged.
+
+## D6. Checks (2026-11-07)
+
+`check.sh`: PASS, 0 failing, 0 warnings (was 8 failing, 9 warnings).
+
+| Measure | Before | After |
+|---|---|---|
+| Lines | 783 | 529 |
+| Longest line | 324 (prose) | 316 (a table row; no cell over 300, prose ≤ 120) |
+| Header (lines before `## 0.`) | 11, no state | 17, the B3 table |
+| `/stats` output | 33 lines | 39 lines (header now carries state) |
+
+Final search for old section names and numbers: hits only in `Docs/Changelog.md` (moved history) and this file.
+
+### Cold-start test (F3), from `/stats` output plus at most one section
+
+| Question | Answer | From |
+|---|---|---|
+| What is it; is anything live? | macOS maintenance CLI/TUI in Go; not released, so nothing live to break, but `suns` acts on the owner's real Mac | Header (+ §1) |
+| What proves a change, on which branch? | `go build ./... && go vet ./... && go test -race ./...` on `main` | Header |
+| What must never be done, and why? | Run `suns` beyond `--dry-run`/`--help`/`help`/`--version` (changes the owner's Mac); weaken the floor; rename history fields | §1.2 |
+| What is open; next step? | O-1 to O-18 with who and next step; owner checks O-4 to O-7 and decision O-12 | §2 (or §0) |
+| Add a safe-cache target: which files, which test? | `assets/safe_cache.json`; `go test -race ./internal/scanner/` | §5 |
+
+Passed: each answer needed one section or the header only.
+
+### F1 items with a reason instead of a plain yes
+
+- **Section references give number and name:** references inside `stats.md` use the number only (e.g. "§1.3") to
+  keep lines short; references from other files (`CLAUDE.md`, `.claude/rules/safety.md`) give number and name.
+- **Drifting counts:** "18 tools" (§4) and "16 of the 18" (L-5) have no recount command; they are read off two short
+  lists named in the same sentence (`productionAllowlist`, `pinnedTools`).
+- All other F1 items: yes.
+
+Work file moved to `Docs/Legacy/stats-work-2026-11-07.md` at the end of D6.

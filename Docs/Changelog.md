@@ -8,7 +8,9 @@ Newest first. One entry per change that touched the code or `stats.md`. The stat
   session now gets the project, its hazards, the verify command and open work from the header and §0–§2. Open work,
   rulings and limitations now have stable IDs (O-1 to O-18, R-1 to R-4, L-1 to L-6).
 - **Why:** owner request (`/makestats overhaul`); the old doc had no dates, stale commit state and no IDs.
-- **Files:** `Docs/stats.md`, `Docs/Changelog.md` (new), `Docs/Legacy/stats-2026-11-07.md` (backup of the old doc)
+- **Files:** `Docs/stats.md`, `Docs/Changelog.md` (new), `Docs/Legacy/stats-2026-11-07.md` (backup),
+  `Docs/Legacy/stats-work-2026-11-07.md` (work record), `CLAUDE.md` (status-doc block), `.claude/rules/safety.md`
+  (section reference); in Res: `Docs/WorkMap.md`, `Docs/stats.md` (Suns rows)
 - **Verified:** `go build ./... && go vet ./... && go test -race -count=1 ./...` → all pass (172 test functions,
   24 packages with tests); no code changed; not checked on a device.
 - **History moved:** the old §9 phase table, word for word, to "Older history" below.
